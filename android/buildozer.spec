@@ -8,7 +8,7 @@ source.exclude_dirs = tests,venv,venv313,.git,__pycache__,.claude,.venv,.buildoz
 
 version = 1.0.0
 
-requirements = python3,kivy==2.3.0,pandas,numpy,ta,requests,urllib3,chardet,certifi,idna,android
+requirements = python3,kivy==2.3.0,numpy,ta,requests,urllib3,chardet,certifi,idna,android
 
 orientation = portrait
 fullscreen = 0
