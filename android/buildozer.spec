@@ -8,7 +8,7 @@ source.exclude_dirs = tests,venv,venv313,.git,__pycache__,.claude,.venv,.buildoz
 
 version = 1.0.0
 
-requirements = python3,kivy==2.3.0,pandas==2.0.3,numpy==1.26.4,ta,requests,urllib3,chardet,certifi,idna,android
+requirements = python3,kivy==2.3.0,pandas,numpy,ta,requests,urllib3,chardet,certifi,idna,android
 
 orientation = portrait
 fullscreen = 0
@@ -30,6 +30,7 @@ android.allow_backup = False
 android.accept_sdk_license = True
 
 p4a.branch = develop
+p4a.local_recipes = ./p4a_recipes
 
 [buildozer]
 log_level = 2
