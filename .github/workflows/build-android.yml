@@ -52,6 +52,19 @@ jobs:
         path: android/bin/*.apk
         retention-days: 30
 
+    - name: Show tail of build log on failure
+      if: failure()
+      working-directory: android
+      run: |
+        echo "=== LAST 200 LINES OF .buildozer/android/platform/build/build.log ==="
+        tail -200 .buildozer/android/platform/build/build.log 2>/dev/null || echo "(build log not found, checking other logs...)"
+        echo "=== LAST 100 LINES OF .buildozer/log.txt ==="
+        tail -100 .buildozer/log.txt 2>/dev/null || echo "no log.txt"
+        echo "=== SEARCHING FOR ERRORS ==="
+        grep -ri "error" .buildozer/ 2>/dev/null | tail -50 || echo "no error messages found"
+        echo "=== SEARCHING FOR FAILED ==="
+        grep -ri "FAILED\|failed\|fatal" .buildozer/ 2>/dev/null | tail -30 || echo "no failure messages found"
+
     - name: Upload build logs
       if: always()
       uses: actions/upload-artifact@v4
