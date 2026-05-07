@@ -21,8 +21,21 @@ class NumpyRecipe(CompiledComponentsPythonRecipe):
         join("patches", "remove-default-paths.patch"),
         join("patches", "add_libm_explicitly_to_build.patch"),
         join("patches", "ranlib.patch"),
-        join("patches", "fix-distutils-import.patch"),
     ]
+
+    def _fix_distutils_import(self, arch):
+        """Fix numpy's distutils.msvccompiler import for Python 3.12+."""
+        mingw_path = join(self.get_build_dir(arch.arch),
+                          'numpy', 'distutils', 'mingw32ccompiler.py')
+        with open(mingw_path, 'r') as f:
+            content = f.read()
+        old = 'from distutils.msvccompiler import get_build_version as get_build_msvc_version'
+        new = 'try:\n    from distutils.msvccompiler import get_build_version as get_build_msvc_version\nexcept (ImportError, ModuleNotFoundError):\n    get_build_msvc_version = lambda: 14.0'
+        if old in content:
+            content = content.replace(old, new)
+            with open(mingw_path, 'w') as f:
+                f.write(content)
+            info('Fixed distutils.msvccompiler import in numpy')
 
     def get_recipe_env(self, arch=None, with_flags_in_cc=True):
         env = super().get_recipe_env(arch, with_flags_in_cc)
@@ -32,6 +45,7 @@ class NumpyRecipe(CompiledComponentsPythonRecipe):
 
     def _build_compiled_components(self, arch):
         info('Building compiled components in {}'.format(self.name))
+        self._fix_distutils_import(arch)
         env = self.get_recipe_env(arch)
         with current_directory(self.get_build_dir(arch.arch)):
             hostpython = sh.Command(self.hostpython_location)
