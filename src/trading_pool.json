@@ -1,1 +1,18 @@
-[]
+[
+  {
+    "time": "22:59:21",
+    "symbol": "GRASS-USDT-SWAP",
+    "price": 0.33,
+    "change": -4.34782608695651,
+    "score": 70.0,
+    "strategy": "CandlestickReversalScanner"
+  },
+  {
+    "time": "23:29:19",
+    "symbol": "LIGHT-USDT-SWAP",
+    "price": 0.1775,
+    "change": 0.9096077316657137,
+    "score": 70.0,
+    "strategy": "CandlestickReversalScanner"
+  }
+]

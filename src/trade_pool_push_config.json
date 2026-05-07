@@ -1,0 +1,19 @@
+{
+  "push_method": "Telegram(手机)",
+  "push_scope": "全量",
+  "push_interval_min": 30,
+  "recent_minutes": 180,
+  "min_push_score": 60,
+  "min_resonance_hits": 2,
+  "export_dir": "/Users/apple/Desktop/minimax 龙虾目录/CryptoTrader/reports/trade_pool",
+  "telegram_token": "8342881964:AAHPUpDnyO_0bibsOZfclxkkTJYmrpJ2qxM",
+  "telegram_chat_id": "6936857036",
+  "server_chan_key": "",
+  "smtp_host": "",
+  "smtp_port": 587,
+  "smtp_user": "",
+  "smtp_password": "",
+  "email_to": "",
+  "email_use_tls": true,
+  "push_enabled": true
+}

@@ -1,0 +1,80 @@
+{
+  "pairs": [
+    "APE-USDT-SWAP",
+    "BEAT-USDT-SWAP",
+    "BTC-USDT-SWAP",
+    "KAT-USDT-SWAP",
+    "ZBT-USDT-SWAP",
+    "A-USDT-SWAP",
+    "ALLO-USDT-SWAP",
+    "ANIME-USDT-SWAP",
+    "API3-USDT-SWAP",
+    "BICO-USDT-SWAP",
+    "CHIP-USDT-SWAP",
+    "ETH-USDT-SWAP",
+    "IMX-USDT-SWAP",
+    "KGEN-USDT-SWAP",
+    "MET-USDT-SWAP",
+    "PARTI-USDT-SWAP",
+    "PLUME-USDT-SWAP",
+    "SENT-USDT-SWAP",
+    "TRUMP-USDT-SWAP",
+    "WCT-USDT-SWAP"
+  ],
+  "pinned": [
+    "BTC-USDT-SWAP",
+    "KAT-USDT-SWAP",
+    "BEAT-USDT-SWAP",
+    "ZBT-USDT-SWAP",
+    "APE-USDT-SWAP"
+  ],
+  "col_widths": [
+    181,
+    90,
+    80,
+    60,
+    90,
+    114,
+    182,
+    314
+  ],
+  "settings": {
+    "check_interval_sec": 60,
+    "trend_breakout_pct": 2.5,
+    "trend_breakout_volume_ratio": 1.5,
+    "deep_pullback_pct": 5.0,
+    "stabilization_max_range_pct": 1.2,
+    "stabilization_breakout_volume_ratio": 1.8,
+    "volume_surge_ratio": 5.0,
+    "min_signal_score": 60,
+    "signal_cooldown_min": 18,
+    "signal_actions": {
+      "trend_breakout": {
+        "enable": true,
+        "action": "仅提醒",
+        "telegram": true
+      },
+      "deep_pullback": {
+        "enable": true,
+        "action": "仅提醒",
+        "telegram": true
+      },
+      "stabilization_breakout": {
+        "enable": true,
+        "action": "仅提醒",
+        "telegram": true
+      },
+      "volume_surge": {
+        "enable": true,
+        "action": "仅提醒",
+        "telegram": true
+      },
+      "momentum_divergence": {
+        "enable": true,
+        "action": "仅提醒",
+        "telegram": true
+      }
+    }
+  },
+  "updated_at": "2026-05-06 10:55:12"
+}

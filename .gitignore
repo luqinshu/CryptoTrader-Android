@@ -6,7 +6,14 @@ __pycache__/
 *.egg-info/
 *.egg
 .venv/
-.env/
+.env
+
+# 其他虚拟环境
+venv/
+myenv/
+venv_latest/
+venv313/
+venv314/
 
 # Buildozer
 .buildozer/
@@ -42,3 +49,11 @@ test_*.py
 # 其他
 web_app.py
 cli_scanner.py
+
+# 运行时数据和报告
+data/
+reports/
+pinned_strategies.json
+
+# 清理脚本
+cleanup.sh

@@ -1,0 +1,41 @@
+{
+  "version": 1,
+  "saved_at": "2026-04-24 09:43:01",
+  "enabled": true,
+  "mode": "当前交易对",
+  "targets": [
+    "KAITO-USDT-SWAP"
+  ],
+  "peak_tracker": {
+    "KAITO-USDT-SWAP": 29.99329738105896
+  },
+  "configs": {
+    "KAITO-USDT-SWAP": {
+      "tp_pct": 50.0,
+      "sl_pct": 3.0,
+      "trailing_trigger_pct": 3.0,
+      "trailing_drawdown_pct": 1.2,
+      "breakeven_trigger_pct": 1.0,
+      "breakeven_enabled": false,
+      "breakeven_armed": false,
+      "use_volatility_state": false,
+      "high_vol_threshold_pct": 5.0,
+      "shock_threshold_pct": 4.8,
+      "jump_bar_threshold_pct": 2.8,
+      "jump_volume_ratio": 2.2,
+      "shock_reduce_ratio": 50.0,
+      "use_mark_price_guard": true,
+      "use_funding_guard": true,
+      "funding_threshold_pct": 0.005,
+      "funding_exit_minutes": 23,
+      "enable_partial_tp": true,
+      "partial_tp1_pct": 4.0,
+      "partial_tp1_ratio": 35.0,
+      "partial_tp2_pct": 2.0,
+      "partial_tp2_ratio": 37.0,
+      "partial_tp1_done": false,
+      "partial_tp2_done": false,
+      "shock_reduce_done": false
+    }
+  }
+}

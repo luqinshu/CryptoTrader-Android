@@ -1,1332 +1,1950 @@
-"""
-扫描页面 UI 组件 (完整版 - 含交易对池与排序)
-提供完整的交易对扫描界面
-"""
-
-import sys
-import time
-import json
 import os
+import json
 import threading
+import time
+import hashlib
+from html import escape
 from datetime import datetime
-from typing import Dict, List, Optional
 
-from PyQt5.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel,
-    QTableWidget, QTableWidgetItem, QComboBox, QGroupBox,
-    QFormLayout, QSpinBox, QDoubleSpinBox, QProgressBar,
-    QHeaderView, QFrame, QMessageBox, QSplitter, QCheckBox,
-    QTextEdit, QTabWidget, QFileDialog, QDialog, QLineEdit,
-    QListWidget, QListWidgetItem, QScrollArea
-)
-from PyQt5.QtCore import Qt, QTimer, pyqtSignal
-from PyQt5.QtGui import QFont, QColor
-
+from src.strategy.loader import StrategyLoader
 from src.scanner.engine import ScanEngine
-from src.scanner.base_scanner import BaseScannerStrategy, ScannerSymbol
-from src.strategy.loader import StrategyLoader, StrategyInfo, StrategyType
+from src.scanner.ranking import enrich_scan_result, sort_scan_results
+from src.trading.entry_rule_guard import evaluate_entry_rule_from_klines, normalize_direction
+from src.qt_compat import QCheckBox, QColor, QComboBox, QDoubleSpinBox, QFormLayout, QGridLayout, QGroupBox, QHBoxLayout, QHeaderView, QLabel, QListWidget, QListWidgetItem, QMenu, QMessageBox, QProgressBar, QPushButton, QScrollArea, QSpinBox, QTabWidget, QTableWidget, QTableWidgetItem, QTextEdit, QThread, QTimer, QVBoxLayout, QWidget, Qt, Signal
 
+class ScanThread(QThread):
+    """异步扫描线程 - 支持批量结果推送和实时进度"""
+    finished = Signal(list)
+    result_found = Signal(list)
+    result_found_single = Signal(dict)
+    progress = Signal(int, str, str, int, int, str)
+    error = Signal(str)
 
-class AutoCloseDialog(QDialog):
-    """自动关闭的对话框"""
-    
-    def __init__(self, title, message, parent=None, timeout=10):
-        super().__init__(parent)
-        self.timeout = timeout
-        self.remaining = timeout
-        
-        self.setWindowTitle(title)
-        self.setMinimumWidth(400)
-        self.setModal(True)
-        
-        layout = QVBoxLayout(self)
-        
-        # 消息标签
-        msg_label = QLabel(message)
-        msg_label.setWordWrap(True)
-        msg_label.setStyleSheet("font-size: 13px; padding: 10px;")
-        layout.addWidget(msg_label)
-        
-        # 倒计时标签
-        self.countdown_label = QLabel(f"⏱ {self.remaining} 秒后自动关闭")
-        self.countdown_label.setStyleSheet(
-            "color: #00ccff; font-size: 12px; font-weight: bold; padding: 5px;"
-        )
-        self.countdown_label.setAlignment(Qt.AlignCenter)
-        layout.addWidget(self.countdown_label)
-        
-        # 按钮布局
-        btn_layout = QHBoxLayout()
-        
-        # 立即关闭按钮
-        close_btn = QPushButton("立即关闭")
-        close_btn.setStyleSheet(
-            "QPushButton { background-color: #00ccff; color: white; border: none; "
-            "border-radius: 4px; padding: 8px 16px; font-weight: bold; }"
-            "QPushButton:hover { background-color: #00aadd; }"
-        )
-        close_btn.clicked.connect(self.accept)
-        btn_layout.addWidget(close_btn)
-        
-        layout.addLayout(btn_layout)
-        
-        # 倒计时定时器
-        self.timer = QTimer()
-        self.timer.timeout.connect(self._update_countdown)
-        self.timer.start(1000)
-    
-    def _update_countdown(self):
-        self.remaining -= 1
-        if self.remaining <= 0:
-            self.timer.stop()
-            self.accept()
-        else:
-            self.countdown_label.setText(f"⏱ {self.remaining} 秒后自动关闭")
-            if self.remaining <= 3:
-                self.countdown_label.setStyleSheet(
-                    "color: #ff4444; font-size: 12px; font-weight: bold; padding: 5px;"
-                )
-
-
-class ScannerPage(QWidget):
-    """
-    扫描页面 - 含交易对池与结果排序
-    """
-
-    def __init__(self, okx_client):
+    def __init__(self, engine, strategy):
         super().__init__()
-        self.okx_client = okx_client
-        self.scan_engine = ScanEngine(okx_client)
-        
-        # 正确构建策略目录路径
-        import pathlib
-        current_file = pathlib.Path(__file__)
-        strategies_dir = str(current_file.parent.parent.parent / 'strategies')
-        self.strategy_loader = StrategyLoader(strategies_dir=strategies_dir)
-        
-        self.current_strategy = None
-        self.is_scanning = False
-        self.scan_thread: Optional[threading.Thread] = None
-        self.scan_results = None
-        self.scan_error = None
+        self.engine = engine
+        self.strategy = strategy
+        self._stop_flag = False
+        self._buffer = []
+        self._progress_counter = 0
+        self._result_counter = 0
 
-        # 交易对池数据
-        self.trading_pool = []
-        self.load_pool()
+    def stop(self):
+        self._stop_flag = True
 
-        # 邮件配置
-        self.email_config = {
-            'smtp_server': 'smtp.gmail.com',
-            'smtp_port': 587,
-            'sender_email': '',
-            'sender_password': '',
-            'recipient_email': '',
-        }
-        self.load_email_config()
+    def _flush_buffer(self):
+        if self._buffer:
+            batch = list(self._buffer)
+            self._buffer.clear()
+            self.result_found.emit(batch)
 
-        # 状态轮询定时器
-        self.status_timer = QTimer()
-        self.status_timer.timeout.connect(self.check_scan_status)
-        self.status_timer.start(200)
-
-        self.init_ui()
-        self.refresh_strategies()
-
-    def load_email_config(self):
-        import json, os
-        config_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'email_config.json')
-        if os.path.exists(config_path):
-            try:
-                with open(config_path, 'r', encoding='utf-8') as f:
-                    self.email_config.update(json.load(f))
-            except Exception as e:
-                print(f"加载邮件配置失败：{e}")
-
-    def save_email_config(self):
-        import json, os
-        config_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'email_config.json')
+    def run(self):
+        import gc
         try:
-            with open(config_path, 'w', encoding='utf-8') as f:
-                json.dump(self.email_config, f, indent=2, ensure_ascii=False)
-        except Exception as e:
-            print(f"保存邮件配置失败：{e}")
-
-    def show_email_config(self):
-        dialog = QDialog(self)
-        dialog.setWindowTitle("📧 邮箱配置")
-        dialog.setModal(True)
-        dialog.resize(400, 300)
-        layout = QFormLayout(dialog)
-        
-        smtp_server = QLineEdit(self.email_config.get('smtp_server', 'smtp.gmail.com'))
-        layout.addRow("SMTP 服务器:", smtp_server)
-        smtp_port = QSpinBox()
-        smtp_port.setRange(1, 65535)
-        smtp_port.setValue(self.email_config.get('smtp_port', 587))
-        layout.addRow("SMTP 端口:", smtp_port)
-        sender_email = QLineEdit(self.email_config.get('sender_email', ''))
-        layout.addRow("发件人邮箱:", sender_email)
-        sender_password = QLineEdit(self.email_config.get('sender_password', ''))
-        sender_password.setEchoMode(QLineEdit.Password)
-        layout.addRow("授权码/密码:", sender_password)
-        recipient_email = QLineEdit(self.email_config.get('recipient_email', ''))
-        layout.addRow("收件人邮箱:", recipient_email)
-        
-        note = QLabel("💡 提示：Gmail/QQ/163 需开启 SMTP 并使用授权码")
-        note.setStyleSheet("color: #888; font-size: 11px;")
-        layout.addRow(note)
-        
-        btn_layout = QHBoxLayout()
-        save_btn = QPushButton("保存")
-        save_btn.clicked.connect(dialog.accept)
-        cancel_btn = QPushButton("取消")
-        cancel_btn.clicked.connect(dialog.reject)
-        btn_layout.addWidget(save_btn)
-        btn_layout.addWidget(cancel_btn)
-        layout.addRow(btn_layout)
-        
-        if dialog.exec_() == QDialog.Accepted:
-            self.email_config.update({
-                'smtp_server': smtp_server.text(),
-                'smtp_port': smtp_port.value(),
-                'sender_email': sender_email.text(),
-                'sender_password': sender_password.text(),
-                'recipient_email': recipient_email.text(),
-            })
-            self.save_email_config()
-            self.status_label.setText("✅ 邮箱配置已保存")
-
-    def send_scan_result_email(self, results: list):
-        import smtplib
-        from email.mime.text import MIMEText
-        from email.mime.multipart import MIMEMultipart
-        
-        if not self.email_config.get('sender_email') or not self.email_config.get('recipient_email'):
-            return False
-        
-        try:
-            msg = MIMEMultipart()
-            msg['From'] = self.email_config['sender_email']
-            msg['To'] = self.email_config['recipient_email']
-            msg['Subject'] = f"📊 加密合约扫描结果 - {datetime.now().strftime('%Y-%m-%d %H:%M')}"
-            body = self.build_email_body(results)
-            msg.attach(MIMEText(body, 'html', 'utf-8'))
-            
-            server = smtplib.SMTP(self.email_config['smtp_server'], self.email_config['smtp_port'])
-            server.starttls()
-            server.login(self.email_config['sender_email'], self.email_config['sender_password'])
-            server.send_message(msg)
-            server.quit()
-            self.status_label.setText("📧 扫描结果已发送到邮箱")
-            return True
-        except Exception as e:
-            print(f"发送邮件失败：{e}")
-            self.status_label.setText(f"❌ 邮件发送失败：{e}")
-            return False
-
-    def build_email_body(self, results: list) -> str:
-        html = f"""
-        <html><head><style>
-            body{{font-family:Arial,sans-serif;background:#f5f5f5;padding:20px;}}
-            .container{{max-width:800px;margin:0 auto;background:white;padding:20px;border-radius:8px;}}
-            h2{{color:#0066cc;}} table{{width:100%;border-collapse:collapse;margin:20px 0;}}
-            th{{background:#f0f0f0;padding:10px;text-align:left;border-bottom:2px solid #ddd;}}
-            td{{padding:8px 10px;border-bottom:1px solid #eee;}}
-            .gain{{color:#00aa00;font-weight:bold;}} .loss{{color:#ff0000;font-weight:bold;}}
-        </style></head><body><div class="container">
-        <h2>📊 加密合约扫描结果</h2><p>扫描时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
-        """
-        if results and results[0].get('type') == 'gainer_loser_ranking':
-            data = results[0]
-            if data.get('top_gainers'):
-                html += "<h3>📈 涨幅榜 TOP</h3><table><tr><th>排名</th><th>交易对</th><th>价格</th><th>涨幅</th><th>量</th></tr>"
-                for i in data['top_gainers']:
-                    html += f"<tr><td>#{i.get('rank')}</td><td>{i.get('symbol','').replace('-USDT-SWAP','/USDT')}</td><td>{i.get('last_price',0):.4f}</td><td class='gain'>+{i.get('price_change_24h',0):.2f}%</td><td>{i.get('volume_24h',0)/1e6:.2f}M</td></tr>"
-                html += "</table>"
-            if data.get('top_losers'):
-                html += "<h3>📉 跌幅榜 TOP</h3><table><tr><th>排名</th><th>交易对</th><th>价格</th><th>跌幅</th><th>量</th></tr>"
-                for i in data['top_losers']:
-                    html += f"<tr><td>#{i.get('rank')}</td><td>{i.get('symbol','').replace('-USDT-SWAP','/USDT')}</td><td>{i.get('last_price',0):.4f}</td><td class='loss'>{i.get('price_change_24h',0):.2f}%</td><td>{i.get('volume_24h',0)/1e6:.2f}M</td></tr>"
-                html += "</table>"
-        else:
-            passed = [r for r in results if r.get('passed')]
-            html += f"<h3>✅ 符合条件的交易对 ({len(passed)}个)</h3><table><tr><th>交易对</th><th>价格</th><th>涨跌</th><th>得分</th></tr>"
-            for r in passed[:20]:
-                html += f"<tr><td>{r.get('symbol','').replace('-USDT-SWAP','/USDT')}</td><td>{r.get('last_price',0):.4f}</td><td class='{'gain' if r.get('price_change_24h',0)>=0 else 'loss'}'>{r.get('price_change_24h',0):+.2f}%</td><td>{r.get('score',0):.1f}%</td></tr>"
-            html += "</table>"
-        html += "</div></body></html>"
-        return html
-
-    def load_pool(self):
-        """加载交易对池"""
-        pool_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'trading_pool.json')
-        if os.path.exists(pool_path):
-            try:
-                with open(pool_path, 'r', encoding='utf-8') as f:
-                    self.trading_pool = json.load(f)
-            except Exception as e:
-                print(f"加载交易池失败：{e}")
-                self.trading_pool = []
-
-    def save_pool(self):
-        """保存交易对池"""
-        pool_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'trading_pool.json')
-        try:
-            with open(pool_path, 'w', encoding='utf-8') as f:
-                json.dump(self.trading_pool, f, indent=2, ensure_ascii=False)
-        except Exception as e:
-            print(f"保存交易池失败：{e}")
-
-    def init_ui(self):
-        """初始化 UI"""
-        layout = QVBoxLayout(self)
-        layout.setSpacing(10)
-        layout.setContentsMargins(10, 10, 10, 10)
-
-        control_panel = self.create_control_panel()
-        layout.addWidget(control_panel)
-
-        self.progress_bar = QProgressBar()
-        self.progress_bar.setVisible(False)
-        layout.addWidget(self.progress_bar)
-
-        status_frame = self.create_status_frame()
-        layout.addWidget(status_frame)
-
-        self.scan_info_frame = self.create_scan_info_frame()
-        layout.addWidget(self.scan_info_frame)
-
-        self.result_tabs = QTabWidget()
-
-        self.gainers_table = self.create_ranking_table("涨幅榜")
-        self.result_tabs.addTab(self.gainers_table, "📈 涨幅榜 TOP")
-
-        self.losers_table = self.create_ranking_table("跌幅榜")
-        self.result_tabs.addTab(self.losers_table, "📉 跌幅榜 TOP")
-
-        self.result_table = self.create_result_table()
-        self.result_tabs.addTab(self.result_table, "扫描结果")
-
-        # 📦 交易对池标签页
-        self.pool_table = self.create_pool_table()
-        self.result_tabs.addTab(self.pool_table, "📦 交易对池")
-
-        self.result_tabs.setCurrentIndex(3)  # 默认显示交易对池
-        layout.addWidget(self.result_tabs)
-
-        self.setStyleSheet("""
-            QWidget { background-color: #1e1e1e; color: #ffffff; }
-            QGroupBox { color: #00ccff; font-weight: bold; border: 1px solid #333; border-radius: 8px; margin-top: 10px; padding-top: 10px; }
-            QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 5px; color: #00ccff; }
-            QPushButton { background-color: #00ccff; color: white; border: none; border-radius: 4px; padding: 8px 16px; font-weight: bold; font-size: 13px; }
-            QPushButton:hover { background-color: #00aadd; }
-            QPushButton:pressed { background-color: #0088aa; }
-            QPushButton:disabled { background-color: #555; color: #888; }
-            QPushButton.stop { background-color: #ff4444; }
-            QPushButton.stop:hover { background-color: #ff6666; }
-            QTableWidget { background-color: #2a2a2a; border: 1px solid #333; border-radius: 4px; gridline-color: #444; }
-            QHeaderView::section { background-color: #333; color: #00ccff; padding: 8px; border: none; font-weight: bold; }
-            QComboBox, QSpinBox, QDoubleSpinBox { background-color: #2a2a2a; border: 1px solid #444; border-radius: 4px; padding: 5px; color: white; }
-            QScrollBar:vertical { background-color: #2a2a2a; width: 12px; border-radius: 6px; }
-            QScrollBar::handle:vertical { background-color: #555; border-radius: 6px; min-height: 30px; }
-            QScrollBar::handle:vertical:hover { background-color: #777; }
-            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0px; }
-        """)
-
-    def create_control_panel(self) -> QWidget:
-        panel = QWidget()
-        layout = QHBoxLayout(panel)
-        layout.setContentsMargins(0, 0, 0, 0)
-
-        strategy_group = QGroupBox("扫描策略")
-        strategy_layout = QVBoxLayout(strategy_group)
-        strategy_layout.setSpacing(8)
-
-        # 策略选择模式
-        self.single_strategy_radio = QCheckBox("单策略模式")
-        self.single_strategy_radio.setChecked(True)
-        self.single_strategy_radio.stateChanged.connect(self.on_strategy_mode_changed)
-        strategy_layout.addWidget(self.single_strategy_radio)
-
-        self.multi_strategy_radio = QCheckBox("多策略轮流模式")
-        self.multi_strategy_radio.stateChanged.connect(self.on_strategy_mode_changed)
-        strategy_layout.addWidget(self.multi_strategy_radio)
-
-        # 单策略下拉框
-        self.strategy_combo = QComboBox()
-        self.strategy_combo.setMinimumWidth(300)
-        self.strategy_combo.currentIndexChanged.connect(self.on_strategy_changed)
-        strategy_layout.addWidget(self.strategy_combo)
-
-        # 多策略列表（可多选）
-        self.strategy_list_widget = QListWidget()
-        self.strategy_list_widget.setSelectionMode(QListWidget.MultiSelection)
-        self.strategy_list_widget.setVisible(False)
-        self.strategy_list_widget.setMinimumHeight(100)
-        strategy_layout.addWidget(self.strategy_list_widget)
-
-        btn_layout = QHBoxLayout()
-        refresh_btn = QPushButton("刷新策略列表")
-        refresh_btn.setFixedWidth(120)
-        refresh_btn.clicked.connect(self.refresh_strategies)
-        btn_layout.addWidget(refresh_btn)
-
-        load_custom_btn = QPushButton("加载自定义策略")
-        load_custom_btn.setFixedWidth(140)
-        load_custom_btn.clicked.connect(self.load_custom_strategy_file)
-        btn_layout.addWidget(load_custom_btn)
-
-        strategy_layout.addLayout(btn_layout)
-
-        layout.addWidget(strategy_group, 1)
-
-        settings_group = QGroupBox("扫描设置")
-        settings_layout = QFormLayout(settings_group)
-        settings_layout.setSpacing(8)
-
-        self.interval_spin = QSpinBox()
-        self.interval_spin.setRange(1, 60)
-        self.interval_spin.setValue(1)
-        self.interval_spin.setSuffix(" 分钟")
-        settings_layout.addRow("扫描间隔:", self.interval_spin)
-
-        # 多策略间隔设置
-        self.multi_interval_spin = QSpinBox()
-        self.multi_interval_spin.setRange(1, 60)
-        self.multi_interval_spin.setValue(5)
-        self.multi_interval_spin.setSuffix(" 分钟")
-        self.multi_interval_spin.setVisible(False)
-        settings_layout.addRow("策略切换间隔:", self.multi_interval_spin)
-
-        self.show_passed_only = QCheckBox("仅显示通过的交易对")
-        self.show_passed_only.setChecked(False)
-        self.show_passed_only.stateChanged.connect(self.on_show_passed_changed)
-        settings_layout.addRow(self.show_passed_only)
-
-        self.email_notify = QCheckBox("扫描结果邮件通知")
-        self.email_notify.setChecked(False)
-        settings_layout.addRow(self.email_notify)
-
-        email_config_btn = QPushButton("📧 配置邮箱")
-        email_config_btn.setFixedWidth(100)
-        email_config_btn.clicked.connect(self.show_email_config)
-        settings_layout.addRow(email_config_btn)
-
-        layout.addWidget(settings_group, 1)
-
-        button_layout = QVBoxLayout()
-        button_layout.setSpacing(8)
-
-        self.start_btn = QPushButton("开始扫描")
-        self.start_btn.setMinimumHeight(40)
-        self.start_btn.clicked.connect(self.start_scan)
-        button_layout.addWidget(self.start_btn)
-
-        self.stop_btn = QPushButton("停止扫描")
-        self.stop_btn.setMinimumHeight(40)
-        self.stop_btn.setObjectName("stop")
-        self.stop_btn.clicked.connect(self.stop_scan)
-        self.stop_btn.setEnabled(False)
-        button_layout.addWidget(self.stop_btn)
-
-        self.auto_btn = QPushButton("自动扫描")
-        self.auto_btn.setMinimumHeight(40)
-        self.auto_btn.setCheckable(True)
-        self.auto_btn.clicked.connect(self.toggle_auto_scan)
-        button_layout.addWidget(self.auto_btn)
-
-        layout.addLayout(button_layout, 0)
-        return panel
-
-    def create_status_frame(self) -> QWidget:
-        frame = QFrame()
-        frame.setStyleSheet("QFrame { background-color: #2a2a2a; border: 1px solid #333; border-radius: 4px; padding: 10px; }")
-        layout = QHBoxLayout(frame)
-        self.status_label = QLabel("就绪 - 请选择扫描策略")
-        self.status_label.setStyleSheet("color: #00ccff; font-size: 14px;")
-        layout.addWidget(self.status_label)
-        self.scan_time_label = QLabel("上次扫描：从未")
-        self.scan_time_label.setStyleSheet("color: #888;")
-        layout.addWidget(self.scan_time_label)
-        self.count_label = QLabel("通过：0 / 0")
-        self.count_label.setStyleSheet("color: #00ffaa; font-weight: bold;")
-        layout.addWidget(self.count_label)
-        return frame
-
-    def create_scan_info_frame(self) -> QFrame:
-        frame = QFrame()
-        frame.setStyleSheet("QFrame { background-color: #1a1a1a; border: 1px solid #444; border-radius: 4px; padding: 2px; }")
-        layout = QVBoxLayout(frame)
-        layout.setContentsMargins(5, 2, 5, 2)
-        layout.setSpacing(2)
-        title_label = QLabel("🔍 实时扫描信息")
-        title_label.setStyleSheet("color: #ffaa00; font-weight: bold; font-size: 11px;")
-        layout.addWidget(title_label)
-        self.scanning_symbol_label = QLabel("等待扫描...")
-        self.scanning_symbol_label.setStyleSheet("color: #00ffaa; font-size: 11px; font-weight: bold;")
-        self.scanning_symbol_label.setAlignment(Qt.AlignCenter)
-        layout.addWidget(self.scanning_symbol_label)
-        
-        # 倒计时显示
-        self.countdown_label = QLabel("")
-        self.countdown_label.setStyleSheet("color: #00ccff; font-size: 12px; font-weight: bold;")
-        self.countdown_label.setAlignment(Qt.AlignCenter)
-        layout.addWidget(self.countdown_label)
-        
-        info_layout = QHBoxLayout()
-        info_layout.setContentsMargins(0, 0, 0, 0)
-        self.scan_progress_detail = QLabel("")
-        self.scan_progress_detail.setStyleSheet("color: #cccccc; font-size: 10px;")
-        self.scan_progress_detail.setAlignment(Qt.AlignCenter)
-        info_layout.addWidget(self.scan_progress_detail)
-        layout.addLayout(info_layout)
-        return frame
-
-    def create_result_table(self) -> QTableWidget:
-        table = QTableWidget()
-        table.setColumnCount(10)
-        table.setHorizontalHeaderLabels(["交易对", "最新价", "24h 成交量", "24h 涨跌幅", "24h 最高", "24h 最低", "方向", "得分", "评级", "触发信号"])
-        table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-        table.setSelectionBehavior(QTableWidget.SelectRows)
-        table.setEditTriggers(QTableWidget.NoEditTriggers)
-        table.setAlternatingRowColors(False)
-        table.setSortingEnabled(True)
-        table.setStyleSheet("""
-            QTableWidget {
-                background-color: #1a1a1a;
-                color: #ffffff;
-                gridline-color: #333333;
-                border: 1px solid #333333;
-            }
-            QTableWidget::item {
-                background-color: #1a1a1a;
-                color: #ffffff;
-                padding: 5px;
-            }
-            QTableWidget::item:selected {
-                background-color: #00ccff;
-                color: #000000;
-            }
-            QHeaderView::section {
-                background-color: #2a2a2a;
-                color: #ffffff;
-                padding: 5px;
-                border: 1px solid #333333;
-                font-weight: bold;
-            }
-            QTableWidget QTableCornerButton::section {
-                background-color: #2a2a2a;
-                border: 1px solid #333333;
-            }
-        """)
-        return table
-
-    def create_ranking_table(self, table_type: str):
-        table = QTableWidget()
-        table.setColumnCount(7)
-        table.setHorizontalHeaderLabels(["排名", "交易对", "最新价", "24h 涨跌幅", "24h 成交量", "24h 最高", "24h 最低"])
-        table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-        table.setSelectionBehavior(QTableWidget.SelectRows)
-        table.setEditTriggers(QTableWidget.NoEditTriggers)
-        table.setAlternatingRowColors(False)
-        table.setStyleSheet("""
-            QTableWidget {
-                background-color: #1a1a1a;
-                color: #ffffff;
-                gridline-color: #333333;
-                border: 1px solid #333333;
-            }
-            QTableWidget::item {
-                background-color: #1a1a1a;
-                color: #ffffff;
-                padding: 5px;
-            }
-            QTableWidget::item:selected {
-                background-color: #00ccff;
-                color: #000000;
-            }
-            QHeaderView::section {
-                background-color: #2a2a2a;
-                color: #ffffff;
-                padding: 5px;
-                border: 1px solid #333333;
-                font-weight: bold;
-            }
-            QTableWidget QTableCornerButton::section {
-                background-color: #2a2a2a;
-                border: 1px solid #333333;
-            }
-        """)
-        return table
-
-    def create_pool_table(self) -> QTableWidget:
-        """创建交易对池表格"""
-        table = QTableWidget()
-        table.setColumnCount(7)
-        table.setHorizontalHeaderLabels(["添加时间", "交易对", "最新价", "24h 涨跌幅", "得分", "来源策略", "操作"])
-        table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-        table.setSelectionBehavior(QTableWidget.SelectRows)
-        table.setEditTriggers(QTableWidget.NoEditTriggers)
-        table.setAlternatingRowColors(False)
-        table.setStyleSheet("""
-            QTableWidget {
-                background-color: #1a1a1a;
-                color: #ffffff;
-                gridline-color: #333333;
-                border: 1px solid #333333;
-            }
-            QTableWidget::item {
-                background-color: #1a1a1a;
-                color: #ffffff;
-                padding: 5px;
-            }
-            QTableWidget::item:selected {
-                background-color: #00ccff;
-                color: #000000;
-            }
-            QHeaderView::section {
-                background-color: #2a2a2a;
-                color: #ffffff;
-                padding: 5px;
-                border: 1px solid #333333;
-                font-weight: bold;
-            }
-            QTableWidget QTableCornerButton::section {
-                background-color: #2a2a2a;
-                border: 1px solid #333333;
-            }
-        """)
-        return table
-
-    def on_strategy_mode_changed(self, state):
-        """策略模式切换"""
-        if self.single_strategy_radio.isChecked():
-            self.strategy_combo.setVisible(True)
-            self.strategy_list_widget.setVisible(False)
-            self.multi_interval_spin.setVisible(False)
-        else:
-            self.strategy_combo.setVisible(False)
-            self.strategy_list_widget.setVisible(True)
-            self.multi_interval_spin.setVisible(True)
-
-    def on_show_passed_changed(self, state):
-        """显示过滤切换"""
-        self.refresh_result_table()
-
-    def refresh_strategies(self):
-        """刷新策略列表"""
-        self.strategy_combo.clear()
-        self.strategy_list_widget.clear()
-        
-        strategies = self.strategy_loader.discover_strategies()
-        if not strategies:
-            self.strategy_combo.addItem("未找到策略")
-            return
-        
-        for s in strategies:
-            # 单策略下拉框
-            self.strategy_combo.addItem(s.name, s)
-            
-            # 多策略列表
-            item = QListWidgetItem(s.name)
-            item.setData(Qt.UserRole, s)
-            self.strategy_list_widget.addItem(item)
-        
-        self.on_strategy_changed(0)
-
-    def load_custom_strategy_file(self):
-        file_path, _ = QFileDialog.getOpenFileName(self, "选择策略文件", "", "Python Files (*.py);;All Files (*)")
-        if file_path:
-            info = self.strategy_loader.load_custom_strategy(file_path)
-            if info:
-                self.strategy_combo.addItem(f"{info.name} (自定义)", info)
-                self.strategy_combo.setCurrentIndex(self.strategy_combo.count() - 1)
-                self.on_strategy_changed(self.strategy_combo.currentIndex())
-            else:
-                QMessageBox.warning(self, "警告", f"加载策略失败：{file_path}")
-
-    def on_strategy_changed(self, index: int):
-        if index < 0: return
-        info = self.strategy_combo.itemData(index)
-        if not info: return
-        try:
-            module = self.strategy_loader.load_strategy(info.name)
-            if not module:
-                self.status_label.setText(f"加载策略失败：{info.name}")
-                self.current_strategy = None
+            if self._stop_flag:
+                self.finished.emit([])
                 return
-            cls = None
-            for name, obj in module.__dict__.items():
-                if isinstance(obj, type) and name != 'BaseScannerStrategy':
-                    try:
-                        if issubclass(obj, BaseScannerStrategy): cls = obj; break
-                    except: pass
-            if not cls:
-                for name, obj in module.__dict__.items():
-                    if isinstance(obj, type) and ('Strategy' in name or 'Scanner' in name):
-                        if obj.__module__ == module.__name__: cls = obj; break
-            if not cls:
-                self.current_strategy = None
-                self.status_label.setText(f"⚠️ 策略 {info.name} 不是扫描策略")
-                return
-            config = {}
-            if info.config_schema:
-                for k, v in info.config_schema.items(): config[k] = v.get('default', 0)
-            self.current_strategy = cls(config)
-            self.scan_engine.set_strategy(self.current_strategy)
-            self.status_label.setText(f"✓ 已选择策略：{info.name}")
-        except Exception as e:
-            import traceback; traceback.print_exc()
-            self.current_strategy = None
-            self.status_label.setText(f"❌ 策略加载错误：{e}")
 
-    def _scan_worker(self, symbols=None):
-        try:
-            import time
-            from concurrent.futures import ThreadPoolExecutor, as_completed
-            engine = self.scan_engine
-            engine.is_running = True
+            def on_progress(val, msg, symbol, scanned, total, remaining):
+                if self._stop_flag:
+                    return True
+                self._progress_counter += 1
+                if self._progress_counter % 8 != 0 and scanned < total:
+                    return False
+                self.progress.emit(val, msg, symbol, scanned, total, remaining)
+                return False
 
-            strategy_name = "未知"
-            if self.current_strategy:
-                try: strategy_name = self.current_strategy.__class__.__name__
-                except: pass
-
-            self._scan_progress = {'status': 'fetching', 'message': f'✓ 真实扫描 [{strategy_name}] - 正在获取行情数据...', 'current': 0, 'total': 100}
-            all_tickers = engine.get_all_tickers()
-            if not all_tickers:
-                self.scan_results = []; self.scan_error = "获取行情数据失败"; return
-
-            total = len(all_tickers)
-            self._scan_progress = {'status': 'processing', 'message': f'✓ 真实扫描 [{strategy_name}] - 正在解析数据...', 'current': 0, 'total': total}
-
-            all_symbols_data = []
-            for i, ticker in enumerate(all_tickers):
-                if not engine.is_running: break
-                symbol = engine.parse_ticker(ticker)
-                open_24h = float(ticker.get('open24h', 0))
-                if open_24h > 0: symbol.price_change_24h = ((symbol.last_price - open_24h) / open_24h) * 100
-                
-                # 如果是单边趋势扫描策略(高级版或早期发现版),获取K线数据
-                is_unilateral_advanced = 'UnilateralTrendScannerAdvanced' in strategy_name
-                is_unilateral_early = 'UnilateralTrendScannerEarly' in strategy_name
-                is_swing_pro = 'OKXHourSwingScanner' in strategy_name
-                
-                if is_unilateral_advanced or is_unilateral_early or is_swing_pro:
-                    try:
-                        symbol.extra_data['klines'] = {
-                            '5m': engine.get_klines(symbol.inst_id, bar='5m', limit=50),
-                            '15m': engine.get_klines(symbol.inst_id, bar='15m', limit=50),
-                            '1H': engine.get_klines(symbol.inst_id, bar='1H', limit=100),
-                            '1D': engine.get_klines(symbol.inst_id, bar='1D', limit=200),
-                            '3m': engine.get_klines(symbol.inst_id, bar='3m', limit=50),
-                        }
-                    except Exception as e:
-                        print(f"获取 {symbol.inst_id} K线数据失败: {e}")
-                        symbol.extra_data['klines'] = {}
-                
-                all_symbols_data.append(symbol)
-                self._scan_progress = {'current': i + 1, 'total': total, 'symbol': symbol.inst_id, 'last_price': symbol.last_price, 'volume_24h': symbol.volume_24h, 'price_change_24h': symbol.price_change_24h}
-
-            results = []
-            is_ranking = hasattr(engine.strategy, 'scan_all_symbols')
-            if is_ranking:
-                self._scan_progress = {'status': 'analyzing', 'message': f'正在分析 {len(all_symbols_data)} 个交易对...', 'current': len(all_symbols_data), 'total': total}
-                results = [engine.strategy.scan_all_symbols(all_symbols_data)]
-            else:
-                is_multi = hasattr(engine.strategy, '_check_daily_breakout') or hasattr(engine.strategy, '_check_daily_trend')
-                is_vol = 'Volume' in strategy_name
-                is_simple = 'SimpleMA' in strategy_name or '简单均线' in strategy_name
-
-                self._scan_progress = {'status': 'filtering', 'message': '预过滤筛选...', 'current': 0, 'total': total}
-                candidates = []
-                for i, symbol in enumerate(all_symbols_data):
-                    if not engine.is_running: break
-                    if symbol.volume_24h < 500000: continue
-                    if is_multi or is_vol or is_simple:
-                        dk = engine.get_klines(symbol.inst_id, bar='1D', limit=30)
-                        if dk and len(dk) >= 25:
-                            passed = False
-                            if is_multi: passed, _ = engine.strategy._check_daily_trend(dk) if hasattr(engine.strategy, '_check_daily_trend') else engine.strategy._check_daily_breakout(dk)
-                            elif is_vol: passed = True # 成交量策略不依赖日线过滤
-                            elif is_simple: passed = True
-                            if passed: candidates.append(symbol)
-                    else: candidates.append(symbol)
-                    self._scan_progress = {'current': i + 1, 'total': total, 'symbol': symbol.inst_id, 'status': f'预过滤: {len(candidates)}个候选'}
-
-                self._scan_progress = {'status': 'fetching_klines', 'message': f'获取{len(candidates)}个候选K线数据...'}
-                def fetch_klines(sym):
-                    try:
-                        data = {}
-                        if is_multi:
-                            if 'MultiIndicator' in strategy_name: data = {'1D': engine.get_klines(sym.inst_id, '1D', 50), '1H': engine.get_klines(sym.inst_id, '1H', 50), '15m': engine.get_klines(sym.inst_id, '15m', 50)}
-                            else: data = {'1D': engine.get_klines(sym.inst_id, '1D', 50), '1H': engine.get_klines(sym.inst_id, '1H', 100), '3m': engine.get_klines(sym.inst_id, '3m', 100)}
-                        elif is_vol: data = {'1H': engine.get_klines(sym.inst_id, '1H', 30)}
-                        elif is_simple: data = {'4H': engine.get_klines(sym.inst_id, '4H', 50), '1D': engine.get_klines(sym.inst_id, '1D', 50)}
-                        elif 'Triple' in strategy_name: data = {'1D': engine.get_klines(sym.inst_id, '1D', 60), '1H': engine.get_klines(sym.inst_id, '1H', 65), '3m': engine.get_klines(sym.inst_id, '3m', 30)}
-                        else: data = {'1D': engine.get_klines(sym.inst_id, '1D', 50), '1H': engine.get_klines(sym.inst_id, '1H', 50)}
-                        sym.extra_data['klines'] = data
-                        return sym, True
-                    except: return sym, False
-
-                with ThreadPoolExecutor(max_workers=10) as ex:
-                    futures = {ex.submit(fetch_klines, s): s for s in candidates}
-                    done = 0
-                    for f in as_completed(futures):
-                        s, ok = f.result(); done += 1
-                        self._scan_progress = {'current': done, 'total': len(candidates), 'symbol': s.inst_id, 'status': f'K线: {done}/{len(candidates)}'}
-
-                for i, sym in enumerate(candidates):
-                    if not engine.is_running: break
-                    if not sym.extra_data.get('klines'): continue
-                    res = engine.strategy.scan_symbol(sym)
-                    res.update({'last_price': sym.last_price, 'volume_24h': sym.volume_24h, 'price_change_24h': sym.price_change_24h, 'high_24h': sym.high_24h, 'low_24h': sym.low_24h})
-                    results.append(res)
-                    self._scan_progress = {'current': i + 1, 'total': len(candidates), 'symbol': sym.inst_id, 'result': res}
-
-            self.scan_results = results; self.scan_error = None
-        except Exception as e:
-            import traceback; traceback.print_exc()
-            self.scan_results = None; self.scan_error = str(e)
-
-    def start_scan(self):
-        if not self.current_strategy:
-            QMessageBox.warning(self, "警告", "请先选择一个有效的扫描策略")
-            return
-        if self.is_scanning: return
-
-        strategy_name = self.current_strategy.__class__.__name__
-        strategy_module = self.current_strategy.__class__.__module__
-        print(f"\n{'='*50}\n=== 开始真实扫描 ===\n策略名称: {strategy_name}\n策略模块: {strategy_module}\n{'='*50}\n")
-
-        self.is_scanning = True; self.scan_results = None; self.scan_error = None
-        self._scan_progress = {'status': 'starting', 'message': '正在启动扫描...', 'current': 0, 'total': 100}
-
-        self.start_btn.setEnabled(False); self.stop_btn.setEnabled(True); self.auto_btn.setEnabled(False)
-        self.progress_bar.setVisible(True); self.progress_bar.setValue(0)
-
-        self.status_label.setText(f"✓ 真实扫描 [{strategy_name}] - 正在启动...")
-        self.status_label.setStyleSheet("color: #00ff00; font-size: 16px; font-weight: bold;")
-        self.scanning_symbol_label.setText(f"策略模块: {strategy_module}")
-        self.scan_progress_detail.setText(f"API: {self.scan_engine.okx_client.base_url}")
-        
-        self.result_table.setRowCount(0); self.gainers_table.setRowCount(0); self.losers_table.setRowCount(0)
-
-        self.scan_thread = threading.Thread(target=self._scan_worker, daemon=True)
-        self.scan_thread.start()
-        print("扫描线程已启动")
-
-    def stop_scan(self):
-        self.scan_engine.is_running = False
-        if self.scan_thread: self.scan_thread.join(timeout=5); self.scan_thread = None
-        self.is_scanning = False; self.start_btn.setEnabled(True); self.stop_btn.setEnabled(False); self.auto_btn.setEnabled(True); self.progress_bar.setVisible(False)
-        self.status_label.setText("扫描已停止"); self.status_label.setStyleSheet("color: #00ccff; font-size: 14px;")
-
-    def toggle_auto_scan(self, checked: bool):
-        if checked:
-            # 检查策略是否已选择
-            if self.single_strategy_radio.isChecked():
-                if not self.current_strategy:
-                    QMessageBox.warning(self, "警告", "请先选择一个有效的扫描策略")
-                    self.auto_btn.setChecked(False)
+            def on_result(res):
+                if self._stop_flag:
                     return
-            else:
-                # 多策略模式
-                selected_items = self.strategy_list_widget.selectedItems()
-                if not selected_items:
-                    QMessageBox.warning(self, "警告", "请先在多策略列表中选择一个或多个策略")
-                    self.auto_btn.setChecked(False)
-                    return
+                self._buffer.append(res)
+                self._result_counter += 1
+                if len(self._buffer) >= 10:
+                    self._flush_buffer()
+                    gc.collect()
 
-            self.auto_scan_interval = self.interval_spin.value() * 60
-            self.countdown_seconds = self.auto_scan_interval
-            self.auto_scan_timer = QTimer()
-            self.auto_scan_timer.timeout.connect(self._auto_scan_tick)
-            self.auto_scan_timer.start(1000)
+            results = self.engine.run_scan(
+                self.strategy,
+                progress_callback=on_progress,
+                result_callback=on_result
+            )
 
-            # 多策略模式初始化
-            self.multi_strategy_mode = self.multi_strategy_radio.isChecked()
-            if self.multi_strategy_mode:
-                self.selected_strategies = []
-                for item in self.strategy_list_widget.selectedItems():
-                    info = item.data(Qt.UserRole)
-                    if info:
-                        self.selected_strategies.append(info)
-                self.current_strategy_index = 0
-                self.strategy_switch_interval = self.multi_interval_spin.value() * 60
-                self.strategy_switch_countdown = self.strategy_switch_interval
-                self._switch_to_next_strategy()
+            self._flush_buffer()
 
-            # 启动倒计时
-            self._update_countdown()
-
-            self.auto_btn.setText("⏹ 停止自动")
-            self.auto_btn.setStyleSheet("QPushButton { background-color: #ff4444; color: white; border: none; border-radius: 4px; padding: 8px 16px; font-weight: bold; font-size: 13px; } QPushButton:hover { background-color: #ff6666; }")
-            
-            if self.multi_strategy_mode:
-                self.status_label.setText(f"⏱ 多策略轮流扫描已启动（{len(self.selected_strategies)}个策略，切换间隔 {self.multi_interval_spin.value()} 分钟）")
-            else:
-                self.status_label.setText(f"⏱ 自动扫描已启动（间隔 {self.interval_spin.value()} 分钟）")
-        else:
-            if hasattr(self, 'auto_scan_timer'):
-                self.auto_scan_timer.stop()
-                del self.auto_scan_timer
-            self.countdown_seconds = 0
-            self.countdown_label.setText("")
-            self.multi_strategy_mode = False
-            self.selected_strategies = []
-            self.auto_btn.setText("▶ 自动扫描")
-            self.auto_btn.setStyleSheet("")
-            self.status_label.setText("⏹ 自动扫描已停止")
-
-    def _switch_to_next_strategy(self):
-        """切换到下一个策略"""
-        if not hasattr(self, 'selected_strategies') or not self.selected_strategies:
-            return
-
-        info = self.selected_strategies[self.current_strategy_index]
-        try:
-            module = self.strategy_loader.load_strategy(info.name)
-            if not module:
-                self.status_label.setText(f"加载策略失败：{info.name}")
+            if self._stop_flag:
                 return
 
-            cls = None
-            for name, obj in module.__dict__.items():
-                if isinstance(obj, type) and name != 'BaseScannerStrategy':
-                    try:
-                        if issubclass(obj, BaseScannerStrategy):
-                            cls = obj
-                            break
-                    except:
-                        pass
-
-            if not cls:
-                for name, obj in module.__dict__.items():
-                    if isinstance(obj, type) and ('Strategy' in name or 'Scanner' in name):
-                        if obj.__module__ == module.__name__:
-                            cls = obj
-                            break
-
-            if not cls:
-                self.current_strategy = None
-                self.status_label.setText(f"⚠️ 策略 {info.name} 不是扫描策略")
-                return
-
-            config = {}
-            if info.config_schema:
-                for k, v in info.config_schema.items():
-                    config[k] = v.get('default', 0)
-
-            self.current_strategy = cls(config)
-            self.scan_engine.set_strategy(self.current_strategy)
-            self.status_label.setText(f"✓ 已切换到策略：{info.name}")
-
-            # 更新索引
-            self.current_strategy_index = (self.current_strategy_index + 1) % len(self.selected_strategies)
-
+            results = sort_scan_results(results)
+            gc.collect()
+            self.finished.emit(results)
         except Exception as e:
+            if self._stop_flag:
+                return
             import traceback
             traceback.print_exc()
-            self.current_strategy = None
-            self.status_label.setText(f"❌ 策略切换错误：{e}")
+            self.error.emit(str(e))
 
-    def _update_countdown(self):
-        """更新倒计时显示"""
-        if not hasattr(self, 'countdown_seconds') or self.countdown_seconds <= 0:
-            self.countdown_label.setText("")
-            return
+class ScannerPage(QWidget):
+    """交易对扫描页面"""
+    # 扫描完成后向外广播结果（供智能助理等订阅）
+    scan_results_ready = Signal(list)
+    # 扫描状态日志（供外部面板订阅实时进度）：(message, level)
+    scan_log_signal = Signal(str, str)
+
+    RESULT_HEADERS = ["交易对", "价格", "24h涨幅", "机会类型", "信号强度", "连续轮数", "建议方向", "扫描理由", "更新时间"]
+    CATEGORY_TABS = [
+        "总览", "突破启动", "新高突破", "单边趋势", "趋势回踩", "背离反转", "超跌反转",
+        "波动率收缩爆发", "趋势回踩二次启动", "中继再启动", "资金费率反转", "持仓量异常", "放量承接",
+        "BTC/ETH牵引", "热度跃迁"
+    ]
+    LEVEL_OPTIONS = ["全部等级", "S", "A", "B", "C", "D"]
+    DIRECTION_OPTIONS = ["全部方向", "BUY", "SELL", "LONG", "SHORT"]
+    QUADRANT_OPTIONS = [
+        "全部象限",
+        "新出现且共振",
+        "新出现但未共振",
+        "连续强化且共振",
+        "连续强化但未共振",
+    ]
+    SORT_OPTIONS = [
+        "按机会评分",
+        "按连续轮数",
+        "按原始分数",
+        "按24H成交额",
+        "按24H涨跌幅",
+        "按更新时间",
+    ]
+
+    def __init__(self, okx_client, trade_pool_page=None, rl_learning_page=None):
+        super().__init__()
+        self.okx_client = okx_client
+        self.engine = ScanEngine(okx_client)
+        import os
+        project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        self.strategy_loader = StrategyLoader(os.path.join(project_root, 'strategies'))
+        self.trade_pool_page = trade_pool_page
+        self.rl_learning_page = rl_learning_page
+        self.current_strategy_name = "未知策略"  # 保存当前执行的策略名称
+        self._scan_thread = None
+        self._log_progress_counter = 0   # scan_log_signal 节流计数器
+        self.is_paused = False
+        self.latest_results = []
+        self.raw_results = []
+        self.aggregate_scan_results = []
+        self.batch_scan_active = False
+        self.previous_scan_keys = set()
+        self.previous_scan_streaks = {}
+        self.result_tables = {}
+        self.result_stats_labels = {}
+        self.strategy_config_inputs = {}
+        self.current_config_strategy_name = None
+        self.show_advanced_strategy_params = False
+        self._current_strategy_config = {}
+        self._pool_live_keys = set()
+        self._load_rejected_signals()
+        # 策略置顶
+        self._pinned_strategies: set = set()
+        self._pin_config_path = os.path.join(project_root, 'src', 'scanner_pinned_strategies.json')
+        self._load_pinned_strategies()
+        self.init_ui()
+        self.scan_log_signal.connect(self._append_scan_log_line)
         
-        minutes = int(self.countdown_seconds // 60)
-        seconds = int(self.countdown_seconds % 60)
-        time_str = f"{minutes:02d}:{seconds:02d}"
+        # 初始刷新余额
+        QTimer.singleShot(500, self.refresh_balance)
         
-        # 根据剩余时间改变颜色
-        if self.countdown_seconds <= 10:
-            color = "#ff4444"  # 红色警告
-        elif self.countdown_seconds <= 30:
-            color = "#ffaa00"  # 黄色警告
-        else:
-            color = "#00ccff"  # 蓝色正常
-        
-        self.countdown_label.setText(f"⏱ 下次扫描倒计时: {time_str}")
-        self.countdown_label.setStyleSheet(f"color: {color}; font-size: 12px; font-weight: bold;")
-    
-    def _auto_scan_tick(self):
-        """自动扫描定时器触发"""
-        # 如果正在扫描，只更新倒计时
-        if self.is_scanning:
+        # 定时器设置
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self.start_scan)
+
+        # 防抖定时器：扫描结果批量到达时，延迟 300ms 再刷新表格，避免每批都重建
+        self._refresh_debounce_timer = QTimer(self)
+        self._refresh_debounce_timer.setSingleShot(True)
+        self._refresh_debounce_timer.timeout.connect(self.refresh_result_view)
+
+        # 僵尸线程列表：旧 ScanThread 未在 200ms 内退出时，暂存于此保持 Python 引用，
+        # 防止 GC 在 OS 线程仍运行时销毁 QThread 对象（→ SIGABRT）。
+        # 线程自然退出后通过 finished 信号自动从列表移除。
+        self._zombie_scan_threads: list = []
+
+    def _safe_discard_scan_thread(self, thread, wait_ms: int = 200):
+        """
+        安全丢弃旧 ScanThread 引用。
+
+        等待最多 wait_ms 毫秒让线程自然退出。若仍在运行，则将其加入
+        僵尸列表（_zombie_scan_threads）以维持 Python 引用，避免 GC 在
+        OS 线程还在运行时销毁 QThread 对象（否则触发 SIGABRT）。
+        线程最终退出时通过 finished 信号自动移出僵尸列表。
+        """
+        if thread is None:
             return
+        if thread.isRunning():
+            if not thread.wait(wait_ms):          # 返回 False = 超时，线程仍在运行
+                # 保持引用直到线程自然结束
+                if thread not in self._zombie_scan_threads:
+                    self._zombie_scan_threads.append(thread)
+                    thread.finished.connect(
+                        lambda t=thread: (
+                            self._zombie_scan_threads.remove(t)
+                            if t in self._zombie_scan_threads else None
+                        )
+                    )
 
-        # 多策略模式：检查是否需要切换策略
-        if hasattr(self, 'multi_strategy_mode') and self.multi_strategy_mode:
-            if hasattr(self, 'strategy_switch_countdown'):
-                self.strategy_switch_countdown -= 1
-                if self.strategy_switch_countdown <= 0:
-                    # 切换策略
-                    self._switch_to_next_strategy()
-                    self.strategy_switch_countdown = self.strategy_switch_interval
+    def shutdown(self, wait_ms: int = 8000):
+        """关闭页面前尽量停止后台扫描线程，避免 QThread 被提前销毁。"""
+        try:
+            self.auto_scan_enabled = False
+            self.current_auto_strategies = []
+            if hasattr(self, "timer"):
+                self.timer.stop()
+            if hasattr(self, "countdown_timer"):
+                self.countdown_timer.stop()
+            if hasattr(self, "_refresh_debounce_timer"):
+                self._refresh_debounce_timer.stop()
+        except Exception:
+            pass
 
-        # 倒计时更新
-        if hasattr(self, 'countdown_seconds'):
-            self.countdown_seconds -= 1
-
-            if self.countdown_seconds <= 0:
-                # 倒计时结束，开始扫描
-                self.countdown_seconds = self.auto_scan_interval  # 重置倒计时
-                self.scan_results = None
-                self.scan_error = None
-                self.result_table.setRowCount(0)
-                self.gainers_table.setRowCount(0)
-                self.losers_table.setRowCount(0)
-                
-                strategy_name = "未知"
-                if self.current_strategy:
-                    try:
-                        strategy_name = self.current_strategy.__class__.__name__
-                    except:
-                        pass
-                
-                self.status_label.setText(f"🔄 自动扫描中... [{strategy_name}]")
-                self.start_scan()
-            else:
-                # 更新倒计时显示
-                self._update_countdown()
-
-    def refresh_result_table(self):
-        """刷新结果表格"""
-        if not hasattr(self, 'scan_results') or not self.scan_results:
-            return
-
-        results = self.scan_results
-        if not results:
-            return
-
-        # 清空表格
-        self.result_table.setRowCount(0)
-
-        # 按得分降序排序
-        sorted_results = sorted(results, key=lambda x: x.get('score', 0), reverse=True)
-
-        # 显示结果
-        for r in sorted_results:
-            # 根据show_passed_only过滤
-            if self.show_passed_only.isChecked() and not r.get('passed'):
-                continue
-            self.add_result_row(r)
-
-    def check_scan_status(self):
-        if not self.is_scanning: return
-        strategy_name = "未知"
-        if self.current_strategy:
-            try: strategy_name = self.current_strategy.__class__.__name__
-            except: strategy_name = "未知策略"
-
-        status_text = f"✓ 真实扫描 [{strategy_name}]"
-        if hasattr(self, '_scan_progress') and self._scan_progress:
-            prog = self._scan_progress
-            current, total = prog.get('current', 0), prog.get('total', 1)
-            symbol, status, message = prog.get('symbol', ''), prog.get('status', ''), prog.get('message', '')
-            self.progress_bar.setValue(current)
-            self.scanning_symbol_label.setText(f"正在扫描: {symbol.replace('-USDT-SWAP', '/USDT').replace('-SWAP', '')}")
-            price, change, volume = prog.get('last_price', 0), prog.get('price_change_24h', 0), prog.get('volume_24h', 0)
-            vol_str = f"{volume / 1000000:.2f}M" if volume >= 1000000 else f"{volume / 1000:.2f}K"
-            change_color = "#00ff00" if change >= 0 else "#ff4444"
-            self.scan_progress_detail.setText(f'进度: {current}/{total} ({current*100//total}%) | 价格: <span style="color:#00ccff">{price:.4f}</span> | 24h量: <span style="color:#ffaa00">{vol_str}</span> | 涨跌: <span style="color:{change_color}">{change:+.2f}%</span>')
-            status_text = f"✓ 真实扫描 [{strategy_name}] - {message or status} ({current}/{total})"
-        else:
-            status_text = f"✓ 真实扫描 [{strategy_name}] - 正在启动..."
-
-        self.status_label.setText(status_text)
-        self.status_label.setStyleSheet("color: #00ff00; font-size: 16px; font-weight: bold;")
-
-        if self.scan_results is not None or self.scan_error is not None:
-            self.on_scan_finished_internal()
-
-    def on_scan_finished_internal(self):
+        old_thread = getattr(self, "_scan_thread", None)
+        if old_thread is not None and old_thread.isRunning():
+            try:
+                self.engine.request_stop()
+                old_thread.stop()
+                self.status_label.setText("正在停止扫描线程...")
+            except Exception:
+                pass
+            old_thread.wait(wait_ms)
+        self._scan_thread = None
         self.is_scanning = False
-        self.start_btn.setEnabled(True)
+
+    def closeEvent(self, event):
+        self.shutdown()
+        super().closeEvent(event)
+
+    def refresh_balance(self):
+        """刷新 USDT 余额（后台线程，避免阻塞 UI）"""
+        import threading
+
+        def _fetch():
+            try:
+                from src.trading.executor import TradeExecutor
+                executor = TradeExecutor(self.okx_client)
+
+                raw_balance = self.okx_client.get_balance()
+                print(f"[调试] OKX 余额接口返回: {raw_balance}")
+
+                balance = executor.get_usdt_balance()
+                print(f"[调试] 解析后的 USDT 余额: {balance}")
+
+                # 回到主线程更新 UI
+                QTimer.singleShot(0, lambda: self._update_balance_ui(balance))
+            except Exception as e:
+                print(f"[错误] 获取余额失败: {e}")
+                QTimer.singleShot(0, lambda: self._update_balance_ui_error(str(e)))
+
+        threading.Thread(target=_fetch, daemon=True).start()
+
+    def _update_balance_ui(self, balance: float):
+        """主线程更新余额 UI"""
+        if balance > 0:
+            self.api_status_label.setText(f"💰 账户余额: {balance:.2f} USDT")
+            self.api_status_label.setStyleSheet("color: #00ffaa; font-weight: bold; font-size: 13px;")
+        else:
+            self.api_status_label.setText(f"⚠️ 账户余额: {balance:.2f} USDT (请检查API密钥和账户类型)")
+            self.api_status_label.setStyleSheet("color: #ffaa00; font-weight: bold; font-size: 13px;")
+
+    def _update_balance_ui_error(self, error: str):
+        """主线程更新余额错误 UI"""
+        self.api_status_label.setText(f"❌ 账户余额: 获取失败 ({error})")
+        self.api_status_label.setStyleSheet("color: #ff4444; font-weight: bold; font-size: 13px;")
+
+    def init_ui(self):
+        layout = QVBoxLayout(self)
+
+        # 1. 顶部控制栏
+        control_group = QGroupBox("扫描控制")
+        control_group.setMaximumHeight(130)  # 限制高度
+        control_layout = QVBoxLayout(control_group)
+        control_layout.setContentsMargins(5, 5, 5, 5)
+        control_layout.setSpacing(5)
+
+        # 第一行：策略多选列表
+        strategies_layout = QHBoxLayout()
+        strategies_layout.addWidget(QLabel("选择策略:"))
+        
+        self.strategy_list = QListWidget()
+        self.strategy_list.setSelectionMode(QListWidget.SelectionMode.MultiSelection)
+        self.strategy_list.setMaximumHeight(80)
+        self.strategy_list.itemSelectionChanged.connect(self.refresh_strategy_config_panel)
+        self.strategy_list.currentItemChanged.connect(lambda *_: self.refresh_strategy_config_panel())
+        self.strategy_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.strategy_list.customContextMenuRequested.connect(self._on_strategy_list_context_menu)
+        strategies_layout.addWidget(self.strategy_list, 1)
+        control_layout.addLayout(strategies_layout)
+
+        # 第二行：控制按钮和间隔设置
+        row2_layout = QHBoxLayout()
+        
+        # 间隔设置
+        row2_layout.addWidget(QLabel("间隔(分):"))
+        self.interval_spin = QSpinBox()
+        self.interval_spin.setRange(1, 1440)
+        self.interval_spin.setValue(5)
+        row2_layout.addWidget(self.interval_spin)
+
+        # 倒计时标签
+        self.countdown_label = QLabel("⏱ 下次扫描：未启动")
+        self.countdown_label.setStyleSheet("color: #ffaa00; font-size: 12px; font-weight: bold;")
+        row2_layout.addWidget(self.countdown_label)
+
+        row2_layout.addStretch()
+
+        # 手动扫描按钮
+        self.scan_btn = QPushButton("🚀 手动扫描")
+        self.scan_btn.clicked.connect(lambda: self.start_scan())
+        self.scan_btn.setStyleSheet("background-color: #007acc; color: white; font-weight: bold; padding: 5px 15px;")
+        row2_layout.addWidget(self.scan_btn)
+
+        # 暂停/恢复按钮（已禁用，因多线程稳定性问题）
+        self.pause_btn = QPushButton("⏸ 暂停扫描")
+        self.pause_btn.setEnabled(False)
+        self.pause_btn.setStyleSheet("background-color: #555555; color: #888888; font-weight: bold; padding: 5px 15px;")
+        row2_layout.addWidget(self.pause_btn)
+
+        # 停止按钮
+        self.stop_btn = QPushButton("⏹ 停止扫描")
+        self.stop_btn.clicked.connect(lambda: self.stop_scan())
         self.stop_btn.setEnabled(False)
-        self.auto_btn.setEnabled(True)
+        self.stop_btn.setStyleSheet("background-color: #dc3545; color: white; font-weight: bold; padding: 5px 15px;")
+        row2_layout.addWidget(self.stop_btn)
+
+        # 定时扫描按钮
+        self.auto_scan_btn = QPushButton("⏱ 启动定时扫描")
+        self.auto_scan_btn.clicked.connect(lambda: self.toggle_auto_scan())
+        self.auto_scan_btn.setStyleSheet("background-color: #28a745; color: white; font-weight: bold; padding: 5px 15px;")
+        row2_layout.addWidget(self.auto_scan_btn)
+
+        control_layout.addLayout(row2_layout)
+        layout.addWidget(control_group)
+
+        # 1.5 策略参数面板
+        self.strategy_config_group = QGroupBox("策略参数")
+        strategy_config_outer_layout = QVBoxLayout(self.strategy_config_group)
+        strategy_config_outer_layout.setContentsMargins(6, 4, 6, 4)
+
+        self.strategy_config_scroll = QScrollArea()
+        self.strategy_config_scroll.setWidgetResizable(True)
+        self.strategy_config_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.strategy_config_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+
+        self.strategy_config_container = QWidget()
+        self.strategy_config_layout = QGridLayout(self.strategy_config_container)
+        self.strategy_config_layout.setContentsMargins(8, 6, 8, 6)
+        self.strategy_config_layout.setSpacing(6)
+        self.strategy_config_layout.setColumnStretch(1, 1)
+        self.strategy_config_layout.setColumnStretch(3, 1)
+        self.strategy_config_scroll.setWidget(self.strategy_config_container)
+        strategy_config_outer_layout.addWidget(self.strategy_config_scroll)
+        self.strategy_config_group.setMinimumHeight(130)
+        self.strategy_config_group.setMaximumHeight(220)
+        layout.addWidget(self.strategy_config_group)
+        self.refresh_strategies_list()
+        self.refresh_strategy_config_panel()
+
+        # 倒计时定时器
+        self.countdown_timer = QTimer(self)
+        self.countdown_timer.timeout.connect(self.update_countdown)
+        self.countdown_remaining = 0
+        self.auto_scan_enabled = False
+        self.current_auto_strategies = [] # 待扫描的策略队列
+        
+        # 暂停/停止状态（暂停功能已移除）
+        self.is_scanning = False
+
+        # 2. 实时扫描信息栏 (增强版)
+        info_group = QGroupBox("实时扫描状态")
+        info_layout = QVBoxLayout(info_group)
+
+        # 第一行：账户余额和当前扫描信息
+        row1_layout = QHBoxLayout()
+
+        # 账户余额 (代替之前的测试网显示)
+        self.api_status_label = QLabel("💰 账户余额: 加载中...")
+        self.api_status_label.setStyleSheet("color: #00ffaa; font-weight: bold; font-size: 13px;")
+        row1_layout.addWidget(self.api_status_label)
+
+        # 当前正在扫描的交易对
+        self.current_symbol_label = QLabel("等待扫描...")
+        self.current_symbol_label.setStyleSheet("color: #00ccff; font-weight: bold; font-size: 13px;")
+        row1_layout.addWidget(self.current_symbol_label, 1)
+
+        # 当前执行的策略
+        self.current_strategy_label = QLabel("策略: -")
+        self.current_strategy_label.setStyleSheet("color: #ffaa00; font-weight: bold; font-size: 13px;")
+        row1_layout.addWidget(self.current_strategy_label)
+
+        # 进度统计
+        self.scan_stats_label = QLabel("")
+        self.scan_stats_label.setStyleSheet("color: #ffaa00; font-size: 12px;")
+        row1_layout.addWidget(self.scan_stats_label)
+
+        info_layout.addLayout(row1_layout)
+
+        # 第二行：扫描进度文本
+        row2_layout = QHBoxLayout()
+        self.scan_progress_label = QLabel("等待开始扫描...")
+        self.scan_progress_label.setStyleSheet("color: #00ccff; font-size: 12px;")
+        row2_layout.addWidget(self.scan_progress_label, 1)
+        info_layout.addLayout(row2_layout)
+
+        # 第三行：实时日志窗口 (新增)
+        row3_layout = QHBoxLayout()
+        self.scan_log_label = QLabel("📋 实时日志: 就绪")
+        self.scan_log_label.setStyleSheet("color: #aaaaaa; font-size: 11px; font-family: 'Menlo', 'Monaco';")
+        self.scan_log_label.setWordWrap(True)
+        row3_layout.addWidget(self.scan_log_label, 1)
+        info_layout.addLayout(row3_layout)
+
+        self.scan_log_browser = QTextEdit()
+        self.scan_log_browser.setReadOnly(True)
+        self.scan_log_browser.setMaximumHeight(110)
+        self.scan_log_browser.setStyleSheet("""
+            QTextEdit {
+                background-color: #15171a;
+                color: #d7dde5;
+                border: 1px solid #2b3138;
+                border-radius: 6px;
+                font-size: 11px;
+                font-family: 'Menlo', 'Monaco', 'Courier New';
+                padding: 4px;
+            }
+        """)
+        info_layout.addWidget(self.scan_log_browser)
+
+        # 被过滤信号按钮
+        self.rejected_btn = QPushButton("📋 被过滤信号")
+        self.rejected_btn.setStyleSheet("QPushButton{background:#3a2d2d;color:#ccc;border:1px solid #5a3a3a;border-radius:3px;padding:2px 8px;}")
+        self.rejected_btn.setMaximumWidth(120)
+        self.rejected_btn.clicked.connect(self._show_rejected_signals)
+        info_layout.addWidget(self.rejected_btn)
+
+        row4_layout = QHBoxLayout()
+        self.live_signal_label = QLabel("🎯 最新命中: 暂无")
+        self.live_signal_label.setStyleSheet("color: #7fd1ff; font-size: 11px;")
+        self.live_signal_label.setWordWrap(True)
+        row4_layout.addWidget(self.live_signal_label, 1)
+        info_layout.addLayout(row4_layout)
+
+        layout.addWidget(info_group)
+
+        # 3. 进度条
+        self.progress_bar = QProgressBar()
         self.progress_bar.setVisible(False)
-        self.scanning_symbol_label.setText("扫描完成")
+        self.progress_bar.setStyleSheet("""
+            QProgressBar { 
+                height: 12px; 
+                text-align: center; 
+                border: 1px solid #444; 
+                border-radius: 6px; 
+                background-color: #1e1e1e;
+            }
+            QProgressBar::chunk {
+                background-color: #007acc;
+                border-radius: 5px;
+            }
+        """)
+        layout.addWidget(self.progress_bar)
 
-        # 如果是自动扫描模式，重置倒计时
-        if hasattr(self, 'auto_scan_timer') and hasattr(self, 'auto_scan_interval'):
-            self.countdown_seconds = self.auto_scan_interval
-            self._update_countdown()
+        # 4. 结果标签页
+        filter_group = QGroupBox("结果过滤与排序")
+        filter_layout = QHBoxLayout(filter_group)
+        filter_layout.setContentsMargins(8, 6, 8, 6)
+        filter_layout.setSpacing(8)
 
-        if self.scan_error:
-            self.scan_progress_detail.setText(f"❌ 错误: {self.scan_error}")
-            self.status_label.setText(f"❌ 扫描失败: {self.scan_error}")
-            self.status_label.setStyleSheet("color: #ff4444; font-size: 16px; font-weight: bold;")
-            QMessageBox.critical(self, "扫描错误", self.scan_error)
+        filter_layout.addWidget(QLabel("方向:"))
+        self.direction_filter_combo = QComboBox()
+        self.direction_filter_combo.addItems(self.DIRECTION_OPTIONS)
+        self.direction_filter_combo.currentTextChanged.connect(self.refresh_result_view)
+        filter_layout.addWidget(self.direction_filter_combo)
+
+        filter_layout.addWidget(QLabel("等级:"))
+        self.level_filter_combo = QComboBox()
+        self.level_filter_combo.addItems(self.LEVEL_OPTIONS)
+        self.level_filter_combo.currentTextChanged.connect(self.refresh_result_view)
+        filter_layout.addWidget(self.level_filter_combo)
+
+        filter_layout.addWidget(QLabel("类型:"))
+        self.category_filter_combo = QComboBox()
+        self.category_filter_combo.addItems(["全部类型", "突破启动", "新高突破", "单边趋势", "趋势回踩", "趋势回踩二次启动", "背离反转", "超跌反转", "波动率收缩爆发", "中继再启动"])
+        self.category_filter_combo.currentTextChanged.connect(self.refresh_result_view)
+        filter_layout.addWidget(self.category_filter_combo)
+
+        filter_layout.addWidget(QLabel("最低评分:"))
+        self.min_score_filter_spin = QDoubleSpinBox()
+        self.min_score_filter_spin.setRange(0.0, 100.0)
+        self.min_score_filter_spin.setDecimals(1)
+        self.min_score_filter_spin.setSingleStep(1.0)
+        self.min_score_filter_spin.setValue(0.0)
+        self.min_score_filter_spin.valueChanged.connect(self.refresh_result_view)
+        filter_layout.addWidget(self.min_score_filter_spin)
+
+        self.resonance_only_check = QCheckBox("只看共振")
+        self.resonance_only_check.toggled.connect(self.refresh_result_view)
+        filter_layout.addWidget(self.resonance_only_check)
+
+        self.new_only_check = QCheckBox("只看最近新出现")
+        self.new_only_check.toggled.connect(self.refresh_result_view)
+        filter_layout.addWidget(self.new_only_check)
+
+        filter_layout.addWidget(QLabel("象限:"))
+        self.quadrant_filter_combo = QComboBox()
+        self.quadrant_filter_combo.addItems(self.QUADRANT_OPTIONS)
+        self.quadrant_filter_combo.currentTextChanged.connect(self.refresh_result_view)
+        filter_layout.addWidget(self.quadrant_filter_combo)
+
+        filter_layout.addWidget(QLabel("排序:"))
+        self.sort_combo = QComboBox()
+        self.sort_combo.addItems(self.SORT_OPTIONS)
+        self.sort_combo.currentTextChanged.connect(self.refresh_result_view)
+        filter_layout.addWidget(self.sort_combo)
+
+        reset_filter_btn = QPushButton("重置")
+        reset_filter_btn.clicked.connect(self.reset_result_filters)
+        filter_layout.addWidget(reset_filter_btn)
+        filter_layout.addStretch()
+        layout.addWidget(filter_group)
+
+        self.result_tabs = QTabWidget()
+        for category_name in self.CATEGORY_TABS:
+            tab_widget, stats_label, table = self._create_result_tab(category_name)
+            self.result_tables[category_name] = table
+            self.result_stats_labels[category_name] = stats_label
+            self.result_tabs.addTab(tab_widget, category_name)
+        self.result_table = self.result_tables["总览"]
+        layout.addWidget(self.result_tabs)
+
+        # 状态栏信息
+        self.status_label = QLabel("就绪")
+        layout.addWidget(self.status_label)
+
+    # ── 策略列表右键菜单 ──
+    def _on_strategy_list_context_menu(self, pos):
+        """策略列表右键菜单（支持多选批量置顶/取消置顶）"""
+        item = self.strategy_list.itemAt(pos)
+        if not item:
+            return
+        # 如果右键点击的项不在已有选中中，则仅选中该项
+        if not item.isSelected():
+            self.strategy_list.clearSelection()
+            item.setSelected(True)
+
+        selected_items = self.strategy_list.selectedItems()
+        if not selected_items:
             return
 
-        results = self.scan_results or []
-        if self.email_notify.isChecked():
-            threading.Thread(target=self.send_scan_result_email, args=(results,), daemon=True).start()
+        names = []
+        for si in selected_items:
+            info = si.data(Qt.ItemDataRole.UserRole)
+            if info and hasattr(info, 'name'):
+                names.append(str(info.name))
 
-        if results and results[0].get('type') in ['gainer_loser_ranking', 'unilateral_trend', 'unilateral_trend_advanced', 'unilateral_trend_early']:
-            data = results[0]
-            
-            # 处理单边趋势扫描结果(包括早期发现版)
-            if data.get('type') in ['unilateral_trend', 'unilateral_trend_advanced', 'unilateral_trend_early']:
-                long_opp = len(data.get('long_opportunities', []))
-                short_opp = len(data.get('short_opportunities', []))
-                total_opp = data.get('total_opportunities', 0)
-                early_count = data.get('early_signals', 0)
-                
-                # 在扫描结果标签页显示
-                self.result_tabs.setCurrentIndex(2)  # 切换到扫描结果标签
-                self.update_unilateral_trend_table(data)
-                
-                is_auto = hasattr(self, 'auto_scan_timer')
-                early_note = f" (其中{early_count}个早期信号)" if early_count > 0 else ""
-                self.status_label.setText(f"✓ 单边趋势扫描完成 - 做多机会 {long_opp} 个, 做空机会 {short_opp} 个{early_note}")
-                self.scan_time_label.setText(f"上次扫描：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-                self.count_label.setText(f"机会：{total_opp}")
-                self.scan_progress_detail.setText(f"做多:{long_opp}个, 做空:{short_opp}个")
-                
-                if total_opp == 0:
-                    dlg = AutoCloseDialog(
-                        "提示",
-                        "扫描完成，但未发现明显的单边趋势机会。",
-                        self,
-                        timeout=10
-                    )
-                    dlg.exec_()
-            else:
-                # 处理涨跌幅排行榜结果
-                gc, lc = len(data.get('top_gainers', [])), len(data.get('top_losers', []))
-                self.update_ranking_tables(data)
-                is_auto = hasattr(self, 'auto_scan_timer')
-                self.status_label.setText(f"{'✓ 真实扫描 - 自动' if is_auto else '✓ 真实扫描 - '}扫描完成 - 涨幅榜 {gc} 个，跌幅榜 {lc} 个")
-                self.scan_time_label.setText(f"上次扫描：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-                self.count_label.setText(f"通过：{gc + lc}")
-                self.scan_progress_detail.setText(f"涨幅榜:{gc}行, 跌幅榜:{lc}行")
-                self.result_tabs.setCurrentIndex(0)
-                if gc == 0 and lc == 0:
-                    # 使用自动关闭弹窗
-                    dlg = AutoCloseDialog(
-                        "提示",
-                        "扫描完成，但未找到符合条件的交易对。",
-                        self,
-                        timeout=10
-                    )
-                    dlg.exec_()
+        if not names:
+            return
+
+        any_pinned = any(n in getattr(self, '_pinned_strategies', set()) for n in names)
+        all_pinned = all(n in getattr(self, '_pinned_strategies', set()) for n in names)
+
+        menu = QMenu(self)
+        menu.setStyleSheet("""
+            QMenu { background-color: #2a2a2a; color: #dddddd; border: 1px solid #444; }
+            QMenu::item:selected { background-color: #3a3a3a; }
+        """)
+        if all_pinned:
+            label = f"📌 取消置顶（{len(names)}个）"
+        elif any_pinned:
+            label = f"📌 全部置顶（{len(names)}个）"
         else:
-            passed = sum(1 for r in results if r.get('passed'))
-            is_auto = hasattr(self, 'auto_scan_timer')
+            label = f"📌 置顶（{len(names)}个）" if len(names) > 1 else "📌 置顶"
+        pin_action = menu.addAction(label)
+        pin_action.triggered.connect(lambda: self._toggle_batch_pin(names, all_pinned))
+        menu.exec(self.strategy_list.viewport().mapToGlobal(pos))
 
-            # 📊 结果排序并显示 - 只显示通过筛选的交易对
-            table = self.result_table
-            table.setRowCount(0)
-            # 按得分降序排序，只显示通过的
-            sorted_results = sorted(results, key=lambda x: x.get('score', 0), reverse=True)
-            for r in sorted_results:
-                # 只显示通过筛选的交易对
-                if r.get('passed'):
-                    self.add_result_row(r)
-
-            self.scan_time_label.setText(f"上次扫描：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-            self.count_label.setText(f"通过：{passed} / {len(results)}")
-            self.scan_progress_detail.setText(f"结果数: {len(results)}, 通过: {passed}")
-            self.status_label.setText(f"{'✓ 真实扫描 - 自动' if is_auto else '✓ 真实扫描 - '}扫描完成 - {passed}/{len(results)} 个交易对符合条件")
-            self.result_tabs.setCurrentIndex(2)
-
-            # 📦 自动入库 - 将通过筛选的交易对添加到交易对池
-            self.update_pool(results)
-
-            if passed == 0 and len(results) > 0:
-                # 使用自动关闭弹窗
-                dlg = AutoCloseDialog(
-                    "提示",
-                    f"扫描完成，共扫描 {len(results)} 个交易对，但其中没有符合条件的交易对。",
-                    self,
-                    timeout=10
-                )
-                dlg.exec_()
-            elif len(results) == 0:
-                # 使用自动关闭弹窗
-                dlg = AutoCloseDialog(
-                    "提示",
-                    "扫描完成，但未找到任何交易对数据。",
-                    self,
-                    timeout=10
-                )
-                dlg.exec_()
-
-    def update_pool(self, results):
-        """将符合条件的交易对加入池中"""
-        new_count = 0
-        for r in results:
-            # 只添加通过筛选的交易对
-            if r.get('passed'):
-                symbol = r.get('symbol', '')
-                # 检查是否已存在（避免重复添加）
-                if not any(p['symbol'] == symbol for p in self.trading_pool):
-                    self.trading_pool.append({
-                        'time': datetime.now().strftime('%H:%M:%S'),
-                        'symbol': symbol,
-                        'price': r.get('last_price', 0),
-                        'change': r.get('price_change_24h', 0),
-                        'score': r.get('score', 0),
-                        'strategy': self.current_strategy.__class__.__name__ if self.current_strategy else '未知'
-                    })
-                    new_count += 1
-                else:
-                    # 如果已存在，更新数据
-                    for p in self.trading_pool:
-                        if p['symbol'] == symbol:
-                            p['time'] = datetime.now().strftime('%H:%M:%S')
-                            p['price'] = r.get('last_price', 0)
-                            p['change'] = r.get('price_change_24h', 0)
-                            p['score'] = r.get('score', 0)
-                            p['strategy'] = self.current_strategy.__class__.__name__ if self.current_strategy else '未知'
-                            break
-        if new_count > 0:
-            self.update_pool_table()
-            self.save_pool()
-            self.status_label.setText(f"✅ 新增 {new_count} 个交易对到交易对池")
-
-    def update_pool_table(self):
-        """刷新交易对池表格（按时间由新到旧排序）"""
-        # 按时间降序排序（新到旧）
-        sorted_pool = sorted(self.trading_pool, key=lambda x: x.get('time', ''), reverse=True)
-        
-        self.pool_table.setRowCount(0)
-        for i, p in enumerate(sorted_pool):
-            self.pool_table.insertRow(i)
-            self.pool_table.setItem(i, 0, QTableWidgetItem(p['time']))
-            self.pool_table.setItem(i, 1, QTableWidgetItem(p['symbol'].replace('-USDT-SWAP', '/USDT')))
-            self.pool_table.setItem(i, 2, QTableWidgetItem(f"{p['price']:.6f}"))
-            chg_item = QTableWidgetItem(f"{p['change']:+.2f}%")
-            chg_item.setForeground(QColor("#00ff00" if p['change'] >= 0 else "#ff4444"))
-            self.pool_table.setItem(i, 3, chg_item)
-            score_item = QTableWidgetItem(f"{p['score']:.1f}%")
-            score_item.setForeground(QColor("#00ff00" if p['score'] >= 70 else "#ffaa00" if p['score'] >= 50 else "#ff4444"))
-            self.pool_table.setItem(i, 4, score_item)
-            self.pool_table.setItem(i, 5, QTableWidgetItem(p['strategy']))
-            
-            btn = QPushButton("移除")
-            btn.setStyleSheet("QPushButton { background-color: #ff4444; color: white; border-radius: 4px; padding: 4px; }")
-            # 注意：移除按钮需要对应原始列表的索引，这里使用符号匹配查找
-            btn.clicked.connect(lambda checked, sym=p['symbol']: self.remove_from_pool_by_symbol(sym))
-            self.pool_table.setCellWidget(i, 6, btn)
-
-    def remove_from_pool_by_symbol(self, symbol):
-        """按交易对符号从池中移除"""
-        self.trading_pool = [p for p in self.trading_pool if p['symbol'] != symbol]
-        self.update_pool_table()
-        self.save_pool()
-        self.status_label.setText(f"🗑 已移除: {symbol}")
-
-    def update_ranking_tables(self, ranking_data: dict):
-        gt, lt = self.gainers_table, self.losers_table
-        gt.setRowCount(0); lt.setRowCount(0)
-        for item in ranking_data.get('top_gainers', []): self.add_ranking_row(gt, item, "gainer")
-        for item in ranking_data.get('top_losers', []): self.add_ranking_row(lt, item, "loser")
-
-    def update_unilateral_trend_table(self, data: dict):
-        """更新单边趋势扫描结果表格"""
-        table = self.result_table
-        table.setRowCount(0)
-        
-        # 合并做多和做空机会
-        all_opportunities = []
-        for opp in data.get('long_opportunities', []):
-            opp['position'] = '做多'
-            all_opportunities.append(opp)
-        for opp in data.get('short_opportunities', []):
-            opp['position'] = '做空'
-            all_opportunities.append(opp)
-        
-        # 按得分降序排序
-        all_opportunities.sort(key=lambda x: x.get('score', 0), reverse=True)
-        
-        # 添加到表格
-        for opp in all_opportunities:
-            row = table.rowCount()
-            table.insertRow(row)
-            
-            # 交易对
-            symbol = opp.get('symbol', '').replace('-USDT-SWAP', '/USDT')
-            table.setItem(row, 0, QTableWidgetItem(symbol))
-            
-            # 最新价
-            table.setItem(row, 1, QTableWidgetItem(f"{opp.get('last_price', 0):.6f}"))
-            
-            # 24h成交量
-            vol = opp.get('volume_24h', 0)
-            vol_str = f"{vol/1e6:.2f}M" if vol >= 1e6 else f"{vol/1e3:.2f}K"
-            table.setItem(row, 2, QTableWidgetItem(vol_str))
-            
-            # 24h涨跌幅
-            chg = opp.get('price_change_24h', 0)
-            chg_item = QTableWidgetItem(f"{chg:+.2f}%")
-            chg_item.setForeground(QColor("#00ff00" if chg >= 0 else "#ff4444"))
-            table.setItem(row, 3, chg_item)
-            
-            # 24h最高
-            table.setItem(row, 4, QTableWidgetItem(f"{opp.get('high_24h', 0):.6f}"))
-            
-            # 24h最低
-            table.setItem(row, 5, QTableWidgetItem(f"{opp.get('low_24h', 0):.6f}"))
-            
-            # 方向
-            pos_item = QTableWidgetItem(opp.get('position', ''))
-            pos_item.setForeground(QColor("#00ff00" if opp.get('position') == '做多' else "#ff4444"))
-            table.setItem(row, 6, pos_item)
-            
-            # 得分
-            sc = opp.get('score', 0)
-            sc_item = QTableWidgetItem(f"{sc}分")
-            if sc >= 90:
-                sc_item.setForeground(QColor("#00ff00"))  # 绿色
-            elif sc >= 75:
-                sc_item.setForeground(QColor("#00ccff"))  # 蓝色
-            elif sc >= 65:
-                sc_item.setForeground(QColor("#ffaa00"))  # 橙色
+    def _toggle_batch_pin(self, names: list, all_pinned: bool):
+        """批量置顶/取消置顶"""
+        for name in names:
+            if all_pinned:
+                self._pinned_strategies.discard(name)
             else:
-                sc_item.setForeground(QColor("#ff4444"))  # 红色
-            sc_item.setData(Qt.UserRole, sc)
-            table.setItem(row, 7, sc_item)
-            
-            # 评级
-            rating = opp.get('rating', '')
-            table.setItem(row, 8, QTableWidgetItem(rating))
-            
-            # 信号 (前3个)
-            signals = opp.get('signals', [])
-            signals_str = " | ".join(signals[:3]) if signals else "无信号"
-            table.setItem(row, 9, QTableWidgetItem(signals_str))
+                self._pinned_strategies.add(name)
+        self._save_pinned_strategies()
+        self.refresh_strategies_list()
 
-    def add_ranking_row(self, table, item, rank_type):
-        row = table.rowCount(); table.insertRow(row)
-        table.setItem(row, 0, QTableWidgetItem(f"#{item.get('rank', '')}"))
-        table.setItem(row, 1, QTableWidgetItem(item.get('symbol', '').replace('-USDT-SWAP', '/USDT')))
-        table.setItem(row, 2, QTableWidgetItem(f"{item.get('last_price', 0):.6f}"))
-        chg = item.get('price_change_24h', 0)
-        chg_item = QTableWidgetItem(f"{chg:+.2f}%"); chg_item.setTextAlignment(Qt.AlignCenter); chg_item.setForeground(QColor("#00ff00" if rank_type=="gainer" else "#ff4444"))
-        table.setItem(row, 3, chg_item)
-        vol = item.get('volume_24h', 0)
-        table.setItem(row, 4, QTableWidgetItem(f"{vol/1e6:.2f}M" if vol>=1e6 else f"{vol/1e3:.2f}K"))
-        table.setItem(row, 5, QTableWidgetItem(f"{item.get('high_24h', 0):.6f}"))
-        table.setItem(row, 6, QTableWidgetItem(f"{item.get('low_24h', 0):.6f}"))
+    def _save_pinned_strategies(self):
+        try:
+            with open(self._pin_config_path, 'w', encoding='utf-8') as f:
+                json.dump(list(self._pinned_strategies), f, ensure_ascii=False)
+        except Exception:
+            pass
 
-    def add_result_row(self, result):
-        table = self.result_table; row = table.rowCount(); table.insertRow(row)
-        table.setItem(row, 0, QTableWidgetItem(result.get('symbol', '').replace('-USDT-SWAP', '/USDT')))
-        table.setItem(row, 1, QTableWidgetItem(f"{result.get('last_price', 0):.6f}"))
-        vol = result.get('volume_24h', 0)
-        table.setItem(row, 2, QTableWidgetItem(f"{vol/1e6:.2f}M" if vol>=1e6 else f"{vol/1e3:.2f}K"))
-        chg = result.get('price_change_24h', 0)
-        chg_item = QTableWidgetItem(f"{chg:.2f}%"); chg_item.setForeground(QColor("#00ff00" if chg>=0 else "#ff4444")); table.setItem(row, 3, chg_item)
-        table.setItem(row, 4, QTableWidgetItem(f"{result.get('high_24h', 0):.6f}"))
-        table.setItem(row, 5, QTableWidgetItem(f"{result.get('low_24h', 0):.6f}"))
-        table.setItem(row, 6, QTableWidgetItem(f"{result.get('conditions_met', 0)}/{result.get('conditions_total', 0)}"))
-        sc = result.get('score', 0)
-        sc_item = QTableWidgetItem(f"{sc:.1f}%"); sc_item.setForeground(QColor("#00ff00" if sc>=80 else "#ffaa00" if sc>=50 else "#ff4444")); sc_item.setData(Qt.UserRole, sc); table.setItem(row, 7, sc_item)
-        st = QTableWidgetItem("✓ 通过" if result.get('passed') else "✗ 未通过"); st.setForeground(QColor("#00ff00" if result.get('passed') else "#ff4444")); table.setItem(row, 8, st)
-        table.setItem(row, 9, QTableWidgetItem(" | ".join([f"{k}: {v}" for k, v in list(result.get('details', {}).items())[:2]])))
+    def _load_pinned_strategies(self):
+        try:
+            if os.path.exists(self._pin_config_path):
+                with open(self._pin_config_path, 'r', encoding='utf-8') as f:
+                    self._pinned_strategies = set(json.load(f))
+        except Exception:
+            self._pinned_strategies = set()
+
+    def refresh_strategies_list(self):
+        """加载所有扫描策略到多选列表（置顶策略排最前）"""
+        if not hasattr(self, 'strategy_list'):
+            return
+        try:
+            # 保存之前选中的策略名称
+            previously_selected = set()
+            for i in range(self.strategy_list.count()):
+                item = self.strategy_list.item(i)
+                if item and item.isSelected():
+                    info = item.data(Qt.ItemDataRole.UserRole)
+                    if info and hasattr(info, 'name'):
+                        previously_selected.add(str(info.name))
+
+            self.strategy_list.clear()
+            strategies = self.strategy_loader.discover_strategies()
+            if not strategies:
+                return
+            pinned = getattr(self, '_pinned_strategies', set())
+            strategies = sorted(strategies, key=lambda s: (0 if str(s.name) in pinned else 1, str(s.name)))
+            for s in strategies:
+                name = str(s.name)
+                tval = str(getattr(s.type, 'value', 'unknown'))
+                prefix = '📌 ' if name in pinned else ''
+                item = QListWidgetItem(f"{prefix}{name} ({tval})")
+                item.setData(Qt.ItemDataRole.UserRole, s)
+                if name in pinned:
+                    item.setForeground(QColor("#ffd700"))
+                self.strategy_list.addItem(item)
+                # 恢复选中状态
+                if name in previously_selected:
+                    item.setSelected(True)
+        except Exception as e:
+            print(f"[ScannerPage] refresh_strategies_list 出错: {e}")
+            import traceback; traceback.print_exc()
+        if self.strategy_list.count() > 0 and self.strategy_list.currentItem() is None:
+            self.strategy_list.setCurrentRow(0)
+        if self.strategy_list.count() > 0 and not self.strategy_list.selectedItems():
+            first_item = self.strategy_list.item(0)
+            if first_item is not None:
+                first_item.setSelected(True)
+        if hasattr(self, 'strategy_config_layout') and hasattr(self, 'strategy_config_group'):
+            self.refresh_strategy_config_panel()
+
+    def refresh_strategy_config_panel(self):
+        """刷新当前选中策略的参数面板。"""
+        if not hasattr(self, 'strategy_config_layout') or not hasattr(self, 'strategy_config_group') or not hasattr(self, 'strategy_list'):
+            return
+
+        while self.strategy_config_layout.count():
+            item = self.strategy_config_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+
+        self.strategy_config_inputs = {}
+        self.current_config_strategy_name = None
+
+        selected_items = self.strategy_list.selectedItems()
+        current_item = self.strategy_list.currentItem()
+        target_item = current_item if current_item in selected_items else (selected_items[0] if selected_items else None)
+        if not target_item:
+            self.strategy_config_group.setTitle("策略参数")
+            self.strategy_config_layout.addWidget(QLabel("请先选择一个策略"), 0, 0, 1, 4)
+            return
+
+        strategy_info = target_item.data(Qt.ItemDataRole.UserRole)
+        if not strategy_info:
+            self.strategy_config_layout.addWidget(QLabel("未找到策略信息"), 0, 0, 1, 4)
+            return
+
+        self.current_config_strategy_name = strategy_info.name
+        self.strategy_config_group.setTitle(f"策略参数 - {strategy_info.name}")
+        schema = strategy_info.config_schema or {}
+        if not schema:
+            self.strategy_config_layout.addWidget(QLabel("该策略没有可配置参数"), 0, 0, 1, 4)
+            return
+
+        if strategy_info.name != "AI截面双因子组合扫描器":
+            self.show_advanced_strategy_params = False
+
+        row_offset = 0
+        if len(selected_items) > 1:
+            note = QLabel("当前多选扫描时，仅此策略会使用这里的参数；其他策略使用各自默认值。")
+            note.setWordWrap(True)
+            note.setStyleSheet("color: #aaaaaa; font-size: 11px;")
+            self.strategy_config_layout.addWidget(note, 0, 0, 1, 4)
+            row_offset = 1
+
+        core_items, advanced_items = self._split_strategy_schema(strategy_info.name, schema)
+        row_offset = self._add_schema_section("核心参数", core_items, row_offset)
+        if advanced_items:
+            toggle_btn = QPushButton("展开高级参数" if not self.show_advanced_strategy_params else "收起高级参数")
+            toggle_btn.setCheckable(True)
+            toggle_btn.setChecked(self.show_advanced_strategy_params)
+            toggle_btn.setStyleSheet("padding: 4px 10px;")
+            toggle_btn.clicked.connect(self.toggle_advanced_strategy_params)
+            self.strategy_config_layout.addWidget(toggle_btn, row_offset, 0, 1, 4)
+            row_offset += 1
+            if self.show_advanced_strategy_params:
+                row_offset = self._add_schema_section("高级参数", advanced_items, row_offset)
+
+    def toggle_advanced_strategy_params(self):
+        self.show_advanced_strategy_params = not self.show_advanced_strategy_params
+        self.refresh_strategy_config_panel()
+
+    def _split_strategy_schema(self, strategy_name, schema):
+        """按策略名称拆分核心/高级参数。"""
+        items = list(schema.items())
+        if strategy_name != "AI截面双因子组合扫描器":
+            return items, []
+
+        core_keys = [
+            "mode",
+            "min_volume_24h",
+            "min_score",
+            "top_n",
+            "dedupe_by_symbol",
+            "min_consensus_engines",
+            "allow_short",
+            "backtest_min_score",
+            "top_n_per_strategy",
+        ]
+        core_set = set(core_keys)
+        core_items = [(k, v) for k, v in items if k in core_set]
+        advanced_items = [(k, v) for k, v in items if k not in core_set]
+        return core_items, advanced_items
+
+    def _add_schema_section(self, title, schema_items, row_offset):
+        """将一组 schema 参数以双列形式加入面板。"""
+        if not schema_items:
+            return row_offset
+
+        title_label = QLabel(title)
+        title_label.setStyleSheet("color: #7fd1ff; font-size: 12px; font-weight: bold;")
+        self.strategy_config_layout.addWidget(title_label, row_offset, 0, 1, 4)
+        row_offset += 1
+
+        for index, (param_name, param_info) in enumerate(schema_items):
+            label = param_info.get('label', param_name)
+            param_type = param_info.get('type', 'float')
+            default_value = param_info.get('default', 0)
+
+            if param_type == 'select':
+                input_widget = QComboBox()
+                options = param_info.get('options', [])
+                for option in options:
+                    if isinstance(option, dict):
+                        input_widget.addItem(str(option.get('label', option.get('value', ''))), option.get('value'))
+                    else:
+                        input_widget.addItem(str(option), option)
+                default_index = input_widget.findData(default_value)
+                if default_index < 0:
+                    default_index = input_widget.findText(str(default_value))
+                if default_index >= 0:
+                    input_widget.setCurrentIndex(default_index)
+            elif param_type == 'int':
+                input_widget = QSpinBox()
+                input_widget.setRange(-999999, 999999)
+                input_widget.setValue(int(default_value))
+            elif param_type == 'float':
+                input_widget = QDoubleSpinBox()
+                input_widget.setRange(-999999.0, 999999.0)
+                input_widget.setDecimals(4)
+                input_widget.setValue(float(default_value))
+            elif param_type == 'bool':
+                input_widget = QCheckBox()
+                input_widget.setChecked(bool(default_value))
+            else:
+                input_widget = QDoubleSpinBox()
+                input_widget.setRange(-999999.0, 999999.0)
+                input_widget.setDecimals(4)
+                input_widget.setValue(float(default_value))
+
+            label_widget = QLabel(f"{label}:")
+            label_widget.setStyleSheet("color: #cccccc;")
+            input_widget.setMinimumWidth(120)
+            grid_row = row_offset + index // 2
+            col_offset = (index % 2) * 2
+            self.strategy_config_layout.addWidget(label_widget, grid_row, col_offset)
+            self.strategy_config_layout.addWidget(input_widget, grid_row, col_offset + 1)
+            self.strategy_config_inputs[param_name] = input_widget
+
+        return row_offset + (len(schema_items) + 1) // 2 + 1
+
+    def get_selected_strategy_config(self, strategy_name: str) -> dict:
+        """返回当前参数面板对应策略的配置。"""
+        if strategy_name != self.current_config_strategy_name:
+            return {}
+        config = {}
+        for param_name, input_widget in self.strategy_config_inputs.items():
+            if isinstance(input_widget, QCheckBox):
+                config[param_name] = input_widget.isChecked()
+            elif isinstance(input_widget, QComboBox):
+                config[param_name] = input_widget.currentData()
+            elif isinstance(input_widget, QSpinBox):
+                config[param_name] = input_widget.value()
+            elif isinstance(input_widget, QDoubleSpinBox):
+                config[param_name] = input_widget.value()
+        return config
+
+    def toggle_auto_scan(self):
+        """切换定时扫描"""
+        try:
+            print(f"[toggle_auto_scan] 当前状态：auto_scan_enabled={self.auto_scan_enabled}")
+            
+            if self.auto_scan_enabled:
+                # 停止定时扫描
+                print("[toggle_auto_scan] 停止定时扫描")
+                self.auto_scan_enabled = False
+                if hasattr(self, 'countdown_timer'):
+                    self.countdown_timer.stop()
+                self.auto_scan_btn.setText("⏱ 启动定时扫描")
+                self.auto_scan_btn.setStyleSheet("background-color: #28a745; color: white; font-weight: bold; padding: 5px 15px;")
+                self.countdown_label.setText("⏱ 下次扫描：已停止")
+                self.status_label.setText("定时扫描已停止")
+            else:
+                # 启动定时扫描
+                print("[toggle_auto_scan] 尝试启动定时扫描")
+                
+                # 检查必要组件是否存在
+                if not hasattr(self, 'strategy_list'):
+                    raise AttributeError("策略列表未初始化")
+                if not hasattr(self, 'interval_spin'):
+                    raise AttributeError("间隔设置未初始化")
+                if not hasattr(self, 'countdown_timer'):
+                    raise AttributeError("倒计时定时器未初始化")
+                
+                # 只使用当前高亮（currentItem）的策略，忽略多选
+                current_item = self.strategy_list.currentItem()
+                if not current_item:
+                    print("[toggle_auto_scan] 警告：没有高亮任何策略")
+                    QMessageBox.warning(
+                        self,
+                        "⚠️ 需要选择策略",
+                        "请先在上方策略列表中单击选中（高亮）一个策略！\n\n"
+                        "📋 操作步骤：\n"
+                        "1️⃣ 单击策略名称（高亮显示）\n"
+                        "2️⃣ 设置扫描间隔时间（默认5分钟）\n"
+                        "3️⃣ 再点击「⏱ 启动定时扫描」\n\n"
+                        "💡 定时扫描只运行当前高亮的策略，切换高亮即可更换策略。"
+                    )
+                    return
+
+                strategy_info = current_item.data(Qt.ItemDataRole.UserRole)
+                print(f"[toggle_auto_scan] 高亮策略：{strategy_info.name if strategy_info else '未知'}")
+
+                self.auto_scan_enabled = True
+                self.countdown_remaining = self.interval_spin.value() * 60  # 转换为秒
+                print(f"[toggle_auto_scan] 间隔时间：{self.interval_spin.value()} 分钟 ({self.countdown_remaining} 秒)")
+
+                self.auto_scan_btn.setText("⏹ 停止定时扫描")
+                self.auto_scan_btn.setStyleSheet("background-color: #dc3545; color: white; font-weight: bold; padding: 5px 15px;")
+                self.countdown_timer.start(1000)  # 每秒更新一次
+                self.update_countdown()
+                sname = strategy_info.name if strategy_info else "未知"
+                self.status_label.setText(
+                    f"✅ 定时扫描已启动  策略: {sname}  间隔: {self.interval_spin.value()} 分钟"
+                )
+                print("[toggle_auto_scan] 定时扫描已成功启动")
+        except Exception as e:
+            error_msg = f"自动扫描启动失败：{str(e)}"
+            print(f"[错误] {error_msg}")
+            import traceback
+            traceback.print_exc()
+            QMessageBox.critical(self, "❌ 启动失败", f"{error_msg}\n\n请查看终端日志获取详细信息。")
+
+    def update_countdown(self):
+        """更新倒计时显示"""
+        if self.is_scanning:
+            self.countdown_label.setText("⏱ 正在扫描...")
+            return
+
+        if self.countdown_remaining > 0:
+            self.countdown_remaining -= 1
+            minutes = self.countdown_remaining // 60
+            seconds = self.countdown_remaining % 60
+            self.countdown_label.setText(f"⏱ 下次扫描：{minutes:02d}:{seconds:02d}")
+            
+            # 倒计时结束，自动扫描
+            if self.countdown_remaining == 0:
+                self.auto_scan_all()
+        else:
+            self.countdown_label.setText("⏱ 准备扫描...")
+
+    def auto_scan_all(self):
+        """定时自动扫描：只运行当前高亮显示的策略（单一策略模式）"""
+        current_item = self.strategy_list.currentItem()
+        if not current_item:
+            self.status_label.setText("⚠️ 无高亮策略，跳过本轮扫描")
+            # 仍需重置倒计时，否则定时器就停了
+            self.countdown_remaining = self.interval_spin.value() * 60
+            return
+
+        strategy_info = current_item.data(Qt.ItemDataRole.UserRole)
+        if not strategy_info:
+            self.countdown_remaining = self.interval_spin.value() * 60
+            return
+
+        # 单策略模式：不做批量聚合
+        self.current_auto_strategies = [strategy_info]
+        self.batch_scan_active = False
+        self.aggregate_scan_results = []
+        self.raw_results = []
+        self.latest_results = []
+        self._pool_live_keys = set()
+
+        self.start_next_auto_strategy()
+
+    def start_next_auto_strategy(self):
+        """开始执行队列中的下一个策略"""
+        if not self.current_auto_strategies:
+            # 所有策略扫描完成，重置倒计时
+            self.countdown_remaining = self.interval_spin.value() * 60
+            self.status_label.setText(f"所有策略扫描完成，下次扫描将在 {self.interval_spin.value()} 分钟后")
+            return
+
+        strategy_info = self.current_auto_strategies.pop(0)
+        self.status_label.setText(f"正在执行自动扫描: {strategy_info.name}")
+        self.start_scan(strategy_info)
+
+    def start_scan(self, strategy_info=None):
+        """开始扫描（支持手动传入策略或从列表获取）"""
+        try:
+            print(f"[start_scan] 被调用，strategy_info={strategy_info}")
+            
+            # 如果没有传入策略，从多选列表获取选中的策略
+            if strategy_info is None:
+                # 手动点击“手动扫描”按钮时的逻辑
+                selected_items = self.strategy_list.selectedItems()
+                if not selected_items and self.strategy_list.currentItem() is not None:
+                    self.strategy_list.currentItem().setSelected(True)
+                    selected_items = self.strategy_list.selectedItems()
+                print(f"[start_scan] 选中项数量: {len(selected_items)}")
+                
+                if not selected_items:
+                    self.status_label.setText("错误：请至少选择一个扫描策略")
+                    QMessageBox.warning(self, "警告", "请先在策略列表中勾选至少一个扫描策略！")
+                    return
+
+                # 手动扫描时，也支持顺序扫描所有选中的
+                self.current_auto_strategies = [item.data(Qt.ItemDataRole.UserRole) for item in selected_items]
+                self.batch_scan_active = len(self.current_auto_strategies) > 1
+                self.aggregate_scan_results = []
+                self.raw_results = []
+                self.latest_results = []
+                self._pool_live_keys = set()
+                strategy_info = self.current_auto_strategies.pop(0)
+            
+            if not strategy_info:
+                self.status_label.setText("错误：无效的策略信息")
+                self.on_scan_finished([])
+                return
+
+            # 保存当前策略名称
+            self.current_strategy_name = strategy_info.name
+
+            strategy_config = self.get_selected_strategy_config(strategy_info.name)
+            strategy_instance = strategy_info.create_instance(strategy_config)
+            if not strategy_instance:
+                self.status_label.setText("错误：无法实例化策略")
+                QMessageBox.critical(self, "启动失败", f"策略 {strategy_info.name} 实例化失败，请检查策略参数或策略文件。")
+                return
+
+            print(f"\n[扫描] 开始执行扫描: {strategy_info.name}")
+            print(f"[扫描] 策略配置: {strategy_info.config_schema}")
+            if strategy_config:
+                print(f"[扫描] 当前生效参数: {strategy_config}")
+
+            strategy_runtime_config = dict(getattr(strategy_instance, "config", {}) or strategy_config or {})
+            self._current_strategy_config = dict(strategy_runtime_config)
+            strategy_code_hash = ""
+            try:
+                with open(strategy_info.path, "r", encoding="utf-8") as f:
+                    strategy_code_hash = hashlib.md5(f.read().encode("utf-8")).hexdigest()[:8]
+            except Exception:
+                strategy_code_hash = ""
+            strategy_instance._rl_strategy_name = strategy_info.name
+            strategy_instance._rl_strategy_path = strategy_info.path
+            strategy_instance._rl_strategy_file = os.path.basename(strategy_info.path)
+            strategy_instance._rl_param_snapshot = strategy_runtime_config
+            strategy_instance._rl_code_hash = strategy_code_hash
+
+            # 关键修复：启动新线程前，安全清理旧线程
+            old_thread = getattr(self, '_scan_thread', None)
+            if old_thread is not None:
+                if old_thread.isRunning():
+                    print("[start_scan] 警告：旧线程仍在运行，发送停止信号...")
+                    self.engine.request_stop()
+                    old_thread.stop()
+                # 安全丢弃：若 200ms 内未退出则暂存僵尸列表，防止 GC 在线程运行时销毁对象
+                self._safe_discard_scan_thread(old_thread, wait_ms=200)
+                self._scan_thread = None
+
+            # 开始扫描前重置 UI
+            self.is_scanning = True
+            self.is_paused = False
+            self.scan_btn.setEnabled(False)
+            self.pause_btn.setEnabled(True)
+            self.stop_btn.setEnabled(True)
+            self.auto_scan_btn.setEnabled(False)
+            self.progress_bar.setVisible(True)
+            self.progress_bar.setValue(10)
+            if not (self.batch_scan_active and self.aggregate_scan_results):
+                self._clear_all_result_tables()
+                self.raw_results = []
+                self.latest_results = []
+            self.status_label.setText(f"正在扫描: {strategy_info.name}...")
+            self.current_symbol_label.setText("准备开始扫描...")
+            self.current_strategy_label.setText(f"📊 策略: {strategy_info.name}")
+            self.scan_stats_label.setText("")
+            self.scan_progress_label.setText("初始化扫描引擎...")
+            self.live_signal_label.setText("🎯 最新命中: 扫描中，等待信号...")
+            if hasattr(self, 'scan_log_browser'):
+                self.scan_log_browser.clear()
+            self._log_progress_counter = 0
+            self.scan_log_signal.emit(
+                f"▶ 开始扫描  策略: {strategy_info.name}  扫描全部 USDT 永续合约", "INFO"
+            )
+            self.scan_log_signal.emit(
+                "[5%|0|0] 正在从 OKX 获取全市场行情，请稍候…", "INFO"
+            )
+
+            # 刷新一次余额
+            self.refresh_balance()
+
+            # 保持线程引用防止被垃圾回收
+            self._scan_thread = ScanThread(self.engine, strategy_instance)
+            self._scan_thread.progress.connect(self.update_progress)
+            self._scan_thread.result_found.connect(self.add_realtime_result_batch)
+            self._scan_thread.finished.connect(self.on_scan_finished)
+            self._scan_thread.error.connect(self.on_scan_error)
+            # 注意：已移除暂停/恢复功能，简化线程实现
+
+            print(f"[扫描] 启动扫描线程...")
+            self._scan_thread.start()
+        except Exception as e:
+            print(f"[错误] 启动扫描失败: {e}")
+            import traceback
+            traceback.print_exc()
+            self.on_scan_error(f"启动失败: {str(e)}")
+
+    def stop_scan(self):
+        """停止扫描"""
+        # 如果当前没有在扫描，但可能在倒计时
+        if not self.is_scanning:
+            if self.auto_scan_enabled:
+                self.toggle_auto_scan()
+            return
+
+        reply = QMessageBox.question(
+            self, '确认停止', 
+            '确定要停止当前扫描吗？',
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        
+        if reply == QMessageBox.StandardButton.Yes:
+            # 清空队列，防止继续扫描下一个
+            self.current_auto_strategies = []
+
+            old_thread = getattr(self, '_scan_thread', None)
+            if old_thread is not None and old_thread.isRunning():
+                self.engine.request_stop()
+                old_thread.stop()
+                self.status_label.setText("正在停止扫描线程...")
+            if old_thread is not None:
+                # 安全丢弃：若 200ms 内未退出则暂存僵尸列表
+                self._safe_discard_scan_thread(old_thread, wait_ms=200)
+                self._scan_thread = None
+
+            # 立即更新 UI 状态
+            self.is_scanning = False
+            self.scan_btn.setEnabled(True)
+            self.pause_btn.setEnabled(False)
+            self.stop_btn.setEnabled(False)
+            self.auto_scan_btn.setEnabled(True)
+            self.progress_bar.setVisible(False)
+            self.status_label.setText("扫描已停止")
+            self.scan_progress_label.setText("扫描已由用户手动停止")
+            self.current_symbol_label.setText("等待扫描...")
+            self.current_strategy_label.setText("策略: -")
+
+    def add_realtime_result_batch(self, batch: list):
+        """批量处理扫描结果，避免UI卡顿"""
+        for res in batch:
+            self._process_single_result(res, refresh=False)
+        self.latest_results = list(self.raw_results)
+        # 防抖：300ms 内多次调用只刷新一次，避免每批都重建全量表格
+        self._refresh_debounce_timer.start(300)
+
+    def add_realtime_result(self, res):
+        """实时将发现的信号插入表格（单条，保留兼容性）"""
+        self._process_single_result(res)
+
+    def _append_scan_log_line(self, message: str, level: str = "INFO"):
+        if not hasattr(self, "scan_log_browser") or self.scan_log_browser is None:
+            return
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        color = {
+            "INFO": "#9ecbff",
+            "WARNING": "#ffd27f",
+            "ERROR": "#ff8f8f",
+            "SUCCESS": "#89f0a5",
+            "TRADE": "#7fdfff",
+        }.get(level, "#d7dde5")
+        self.scan_log_browser.append(
+            f'<span style="color:#6f7a86">[{timestamp}]</span> '
+            f'<span style="color:{color}">[{level}]</span> '
+            f'{message}'
+        )
+        self.scan_log_browser.verticalScrollBar().setValue(
+            self.scan_log_browser.verticalScrollBar().maximum()
+        )
+
+    def _store_rejected_result(self, res: dict, reason: str):
+        """保存被过滤的信号到日志文件，供事后审查"""
+        entry = {
+            "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "symbol": res.get("symbol", ""),
+            "direction": res.get("direction", res.get("side", "")),
+            "score": float(res.get("score", res.get("opportunity_score", 0)) or 0),
+            "category": res.get("category", res.get("strategy_category", "")),
+            "reason": reason,
+            "last_price": float(res.get("last_price", 0) or 0),
+        }
+        # 内存保留
+        if not hasattr(self, "_rejected_signals"):
+            self._rejected_signals = []
+        self._rejected_signals.append(entry)
+        if len(self._rejected_signals) > 500:
+            self._rejected_signals = self._rejected_signals[-500:]
+        # 每 20 条批量写入磁盘
+        if len(self._rejected_signals) % 20 == 0:
+            self._save_rejected_signals()
+
+    def _save_rejected_signals(self):
+        try:
+            import json
+            path = Path(__file__).resolve().parent.parent / "rejected_signals_log.json"
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(self._rejected_signals[-500:], f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+
+    def _load_rejected_signals(self):
+        try:
+            import json
+            path = Path(__file__).resolve().parent.parent / "rejected_signals_log.json"
+            if path.exists():
+                with open(path, encoding="utf-8") as f:
+                    self._rejected_signals = json.load(f)[-500:]
+            else:
+                self._rejected_signals = []
+        except Exception:
+            self._rejected_signals = []
+
+    def _show_rejected_signals(self):
+        """弹窗显示被过滤的信号列表"""
+        signals = getattr(self, "_rejected_signals", [])
+        if not signals:
+            QMessageBox.information(self, "被过滤信号", "暂无被过滤的信号记录")
+            return
+        recent = signals[-50:]
+        lines = [f"{s['time']} | {s['symbol']} | {s.get('direction','')} | 评分{s.get('score',0):.0f} | {s.get('reason','')}"
+                 for s in reversed(recent)]
+        QMessageBox.information(self, "被过滤信号", f"最近 {len(recent)} 条:\n\n" + "\n".join(lines))
+
+    def _entry_rule_filter_result(self, res):
+        direction = normalize_direction(res.get('direction', res.get('side', '')))
+        if not direction:
+            return False, "结果缺少明确方向"
+        klines_map = dict(res.get("klines_map", {}) or {})
+        if not klines_map:
+            return False, "缺少3m/H1 K线，上线前硬性检查无法执行"
+        guard = evaluate_entry_rule_from_klines(
+            klines_map,
+            direction,
+            getattr(self, "_current_strategy_config", {}) or {},
+        )
+        return bool(guard.get("ok")), str(guard.get("reason", "未通过3m/H1硬性检查"))
+
+    def _process_single_result(self, res, refresh=True):
+        """处理单条扫描结果"""
+        passed, reason = self._entry_rule_filter_result(res)
+        if not passed:
+            symbol = res.get('symbol', '')
+            self.scan_log_signal.emit(
+                f"🛑 过滤原因 | {symbol} | {reason}",
+                "WARNING",
+            )
+            self._store_rejected_result(res, reason)
+            return
+        enrich_scan_result(res)
+        res['updated_at'] = datetime.now().isoformat()
+        symbol = res.get('symbol')
+        category = res.get('category')
+        strategy_name = res.get('strategy_name')
+        direction = str(res.get('side', res.get('direction', 'WATCH')))
+        pool_key = (symbol, direction, strategy_name or self.current_strategy_name)
+        if symbol:
+            self.raw_results = [
+                item for item in self.raw_results
+                if (item.get('symbol'), item.get('category'), item.get('strategy_name')) != (symbol, category, strategy_name)
+            ]
+            self.raw_results.append(res)
+            score_val = float(res.get('opportunity_score', res.get('score', 0)) or 0)
+            self.live_signal_label.setText(
+                f"🎯 最新命中: {symbol} | {direction} | 评分 {score_val:.1f}"
+            )
+            category = res.get('category', '')
+            reason_raw = res.get('signals', res.get('reason', ''))
+            reason_txt = (', '.join(reason_raw[:2]) if isinstance(reason_raw, list)
+                          else str(reason_raw)[:60])
+            self.scan_log_signal.emit(
+                f"🎯 命中 {symbol}  {direction}  评分:{score_val:.1f}"
+                + (f"  [{category}]" if category else "")
+                + (f"  {reason_txt}" if reason_txt else ""),
+                "TRADE",
+            )
+            if self.trade_pool_page:
+                self.trade_pool_page.add_results([res], strategy_name or self.current_strategy_name, increment_hits=False)
+                self._pool_live_keys.add(pool_key)
+            if self.rl_learning_page:
+                signal = dict(res)
+                signal.setdefault("strategy_name", strategy_name or self.current_strategy_name)
+                klines_map = signal.get("klines_map", {})
+                if klines_map:
+                    self.rl_learning_page.record_signal_with_trends(signal, klines_map)
+                else:
+                    self.rl_learning_page.record_signal(signal)
+        if refresh:
+            self.latest_results = list(self.raw_results)
+            self.refresh_result_view()
+
+    def fill_table_row(self, table, i, res):
+        """填充表格行的具体数据"""
+        resonance_count = int(res.get('resonance_count', 1) or 1)
+        is_resonance = bool(res.get('is_resonance', False) or resonance_count > 1)
+        is_new_signal = bool(res.get('is_new_signal', False))
+
+        # 交易对
+        symbol_text = res.get('symbol', '-')
+        if is_resonance:
+            symbol_text = f"★ {symbol_text}"
+        if is_new_signal:
+            symbol_text = f"NEW {symbol_text}"
+        symbol_item = QTableWidgetItem(symbol_text)
+        table.setItem(i, 0, symbol_item)
+        
+        # 价格
+        price_item = QTableWidgetItem(f"{res.get('last_price', 0):.4f}")
+        price_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+        table.setItem(i, 1, price_item)
+        
+        # 24h涨幅
+        change = res.get('change_24h', res.get('price_change_24h', 0))
+        change_item = QTableWidgetItem(f"{change:+.2f}%")
+        change_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+        if change > 0: change_item.setForeground(Qt.GlobalColor.green)
+        elif change < 0: change_item.setForeground(Qt.GlobalColor.red)
+        table.setItem(i, 2, change_item)
+
+        # 机会类型
+        category = res.get('category', '-')
+        if is_resonance:
+            category = f"{category} · 共振x{max(resonance_count, int(res.get('resonance_strategy_count', 1) or 1))}"
+        category_item = QTableWidgetItem(str(category))
+        category_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+        table.setItem(i, 3, category_item)
+        
+        # 信号强度 (Score)
+        opportunity_score = float(res.get('opportunity_score', res.get('score', 0)) or 0)
+        opportunity_level = res.get('opportunity_level', '')
+        score_text = f"{opportunity_score:.1f}"
+        if opportunity_level:
+            score_text = f"{score_text} ({opportunity_level})"
+        if is_resonance:
+            score_text = f"{score_text} ★"
+        if is_new_signal:
+            score_text = f"{score_text} NEW"
+        score_item = QTableWidgetItem(score_text)
+        score_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+        if opportunity_score >= 84:
+            score_item.setForeground(Qt.GlobalColor.cyan)
+        table.setItem(i, 4, score_item)
+
+        # 连续出现轮数
+        streak_count = int(res.get('streak_count', 1) or 1)
+        streak_text = f"{streak_count}"
+        if is_new_signal:
+            streak_text = f"{streak_text} (新)"
+        streak_item = QTableWidgetItem(streak_text)
+        streak_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+        if streak_count >= 3:
+            streak_item.setForeground(Qt.GlobalColor.yellow)
+        table.setItem(i, 5, streak_item)
+        
+        # 建议方向
+        side = res.get('side', res.get('direction', 'WATCH'))
+        side_item = QTableWidgetItem(side)
+        side_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+        if side == 'BUY' or side == 'LONG': side_item.setBackground(Qt.GlobalColor.darkGreen)
+        elif side == 'SELL' or side == 'SHORT': side_item.setBackground(Qt.GlobalColor.darkRed)
+        table.setItem(i, 6, side_item)
+        
+        # 理由/详情
+        reason = res.get('priority_reason', res.get('reason', res.get('details', '-')))
+        if isinstance(reason, list): reason = ", ".join(reason)
+        if is_resonance:
+            strategy_name = str(res.get('strategy_name', '')).strip()
+            strategy_desc = f"{strategy_name} | " if strategy_name else ""
+            reason = f"[多策略共振] {strategy_desc}{reason}"
+        if is_new_signal:
+            reason = f"[最近新出现] {reason}"
+        table.setItem(i, 7, QTableWidgetItem(str(reason)[:100]))
+        
+        # 时间
+        time_str = datetime.now().strftime("%H:%M:%S")
+        table.setItem(i, 8, QTableWidgetItem(time_str))
+
+        if is_resonance:
+            resonance_bg = Qt.GlobalColor.darkYellow
+            for col in [0, 3, 4]:
+                cell = table.item(i, col)
+                if cell is not None:
+                    cell.setBackground(resonance_bg)
+        if is_new_signal:
+            new_fg = Qt.GlobalColor.yellow
+            for col in [0, 4, 5, 7]:
+                cell = table.item(i, col)
+                if cell is not None:
+                    cell.setForeground(new_fg)
+
+    def on_scan_finished(self, results):
+        """扫描完成回调"""
+        self.is_scanning = False
+        self.is_paused = False
+        self.scan_btn.setEnabled(True)
+        self.pause_btn.setEnabled(False)
+        self.stop_btn.setEnabled(False)
+        self.auto_scan_btn.setEnabled(True)
+        self.pause_btn.setText("⏸ 暂停扫描")
+        self.pause_btn.setStyleSheet("background-color: #ffc107; color: black; font-weight: bold; padding: 5px 15px;")
+        self.progress_bar.setVisible(False)
+
+        # 安全清理线程引用（不阻塞 UI）
+        old_thread = getattr(self, '_scan_thread', None)
+        if old_thread is not None:
+            # on_scan_finished 是由 finished 信号触发，线程即将退出，200ms 应足够；
+            # 若仍未退出则暂存僵尸列表保持引用，防止 GC 在运行时销毁 QThread。
+            self._safe_discard_scan_thread(old_thread, wait_ms=200)
+            self._scan_thread = None
+
+        # 最终校准一次结果（按分数排序）
+        finalized_results = []
+        filtered_out = 0
+        filtered_details = []
+        for item in (results or []):
+            item = dict(item)
+            item.setdefault('updated_at', datetime.now().isoformat())
+            item.setdefault('strategy_name', self.current_strategy_name)
+            passed, reason = self._entry_rule_filter_result(item)
+            if not passed:
+                filtered_out += 1
+                filtered_details.append((item.get('symbol', ''), reason))
+                self.scan_log_signal.emit(
+                    f"🛑 过滤原因 | {item.get('symbol', '')} | {reason}",
+                    "WARNING",
+                )
+                self._store_rejected_result(item, reason)
+                continue
+            finalized_results.append(item)
+        if self.batch_scan_active:
+            self.aggregate_scan_results = self._merge_scan_results(self.aggregate_scan_results, finalized_results)
+            self.raw_results = sort_scan_results(self.aggregate_scan_results)
+        else:
+            self.raw_results = sort_scan_results(finalized_results)
+        import gc
+        gc.collect()
+        self.latest_results = list(self.raw_results)
+        self.refresh_result_view()
+
+        # 广播扫描结果供外部订阅（智能助理等）
+        if self.raw_results:
+            self.scan_results_ready.emit(list(self.raw_results))
+
+        # 将结果添加到交易对池
+        if self.trade_pool_page and finalized_results:
+            pending_results = []
+            for res in finalized_results:
+                direction = str(res.get('direction', res.get('side', 'WATCH')))
+                pool_key = (res.get('symbol'), direction, self.current_strategy_name)
+                if pool_key not in self._pool_live_keys:
+                    pending_results.append(res)
+            if pending_results:
+                self.trade_pool_page.add_results(pending_results, self.current_strategy_name)
+
+        # 更新状态显示
+        finish_msg = (
+            f"✅ 策略扫描完成: {datetime.now().strftime('%H:%M:%S')}，"
+            f"输出 {len(finalized_results)} 个信号"
+            + (f"，过滤 {filtered_out} 个" if filtered_out else "")
+        )
+        self.scan_progress_label.setText(finish_msg)
+        self.current_symbol_label.setText("✅ 当前策略扫描已完成")
+        self.current_strategy_label.setText("策略: -")
+        self.scan_stats_label.setText("")
+        self.status_label.setText("就绪")
+        if finalized_results:
+            self.live_signal_label.setText(f"🎯 最新命中: 本轮完成，共 {len(finalized_results)} 个信号")
+        else:
+            self.live_signal_label.setText("🎯 最新命中: 本轮无信号")
+
+        # 广播完成摘要
+        if filtered_details:
+            self.scan_log_signal.emit(
+                f"📋 本轮过滤明细：共 {len(filtered_details)} 个交易对被过滤",
+                "WARNING",
+            )
+            for symbol, reason in filtered_details[:20]:
+                self.scan_log_signal.emit(
+                    f"   - {symbol} | {reason}",
+                    "WARNING",
+                )
+            if len(filtered_details) > 20:
+                self.scan_log_signal.emit(
+                    f"   - 其余 {len(filtered_details) - 20} 个过滤结果未展开显示",
+                    "WARNING",
+                )
+
+        top_hits = []
+        for r in finalized_results[:3]:
+            sym = r.get('symbol', '')
+            dir_ = r.get('direction', '')
+            sc = float(r.get('score', r.get('opportunity_score', 0)) or 0)
+            if sym:
+                top_hits.append(f"{sym}/{dir_}({sc:.0f})")
+        top_str = "  ".join(top_hits)
+        level = "SUCCESS" if results else "INFO"
+        self.scan_log_signal.emit(
+            f"■ 扫描完成  共 {len(results)} 个信号"
+            + (f"  前3: {top_str}" if top_hits else "  无信号"),
+            level,
+        )
+
+        # 检查是否还有待执行的队列
+        if self.current_auto_strategies:
+            print(f"[on_scan_finished] 队列中还有 {len(self.current_auto_strategies)} 个策略待执行，2秒后开始下一个...")
+            QTimer.singleShot(2000, self.start_next_auto_strategy)
+        else:
+            # 队列全部执行完毕
+            self.batch_scan_active = False
+            self.previous_scan_keys = {self._result_identity_key(item) for item in self.raw_results}
+            self.previous_scan_streaks = {
+                self._result_identity_key(item): int(item.get('streak_count', 1) or 1)
+                for item in self.raw_results
+            }
+            if self.auto_scan_enabled:
+                print(f"[on_scan_finished] 全部策略扫描完毕，开始计算下次扫描间隔 ({self.interval_spin.value()} 分钟)")
+                # 只有在这里，当一轮扫描全部完成后，才重置倒计时
+                self.countdown_remaining = self.interval_spin.value() * 60
+                self.status_label.setText(f"所有扫描已完成，下次扫描将在 {self.interval_spin.value()} 分钟后")
+
+    def display_results(self, results):
+        """重新填充整个表格"""
+        results = list(results or [])
+        self._clear_all_result_tables()
+        deduped = []
+        seen = set()
+        for res in results:
+            key = (res.get('symbol'), res.get('category'), res.get('strategy_name'))
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(res)
+        grouped = {category: [] for category in self.CATEGORY_TABS}
+        for res in deduped:
+            grouped["总览"].append(res)
+            category_name = res.get('category')
+            if category_name in grouped:
+                grouped[category_name].append(res)
+        for category_name, items in grouped.items():
+            self._update_result_stats(category_name, items)
+            table = self.result_tables.get(category_name)
+            if table is None:
+                continue
+            # ── 批量更新：预分配行数 + 禁用中间重绘，避免每行触发布局重计算 ──
+            table.setUpdatesEnabled(False)
+            table.setSortingEnabled(False)
+            try:
+                table.setRowCount(len(items))   # 预分配，替代逐行 insertRow
+                for i, res in enumerate(items):
+                    self.fill_table_row(table, i, res)
+            finally:
+                table.setSortingEnabled(True)
+                table.setUpdatesEnabled(True)   # 一次性刷新整张表
+
+    def refresh_result_view(self):
+        annotated_results = self._annotate_resonance(self.raw_results)
+        annotated_results = self._annotate_newness(annotated_results)
+        filtered_results = self._apply_result_filters(annotated_results)
+        sorted_results = self._sort_filtered_results(filtered_results)
+        self.latest_results = sorted_results
+        self.display_results(sorted_results)
+
+    def reset_result_filters(self):
+        # blockSignals 防止 8 个控件逐一触发 refresh_result_view，最后统一刷新一次
+        _widgets = [
+            self.direction_filter_combo, self.level_filter_combo,
+            self.category_filter_combo, self.min_score_filter_spin,
+            self.resonance_only_check, self.new_only_check,
+            self.quadrant_filter_combo, self.sort_combo,
+        ]
+        for w in _widgets:
+            w.blockSignals(True)
+        try:
+            self.direction_filter_combo.setCurrentIndex(0)
+            self.level_filter_combo.setCurrentIndex(0)
+            self.category_filter_combo.setCurrentIndex(0)
+            self.min_score_filter_spin.setValue(0.0)
+            self.resonance_only_check.setChecked(False)
+            self.new_only_check.setChecked(False)
+            self.quadrant_filter_combo.setCurrentIndex(0)
+            self.sort_combo.setCurrentIndex(0)
+        finally:
+            for w in _widgets:
+                w.blockSignals(False)
+        self.refresh_result_view()  # 只触发一次
+
+    def _apply_result_filters(self, results):
+        filtered = []
+        direction_filter = self.direction_filter_combo.currentText()
+        level_filter = self.level_filter_combo.currentText()
+        category_filter = self.category_filter_combo.currentText()
+        min_score = float(self.min_score_filter_spin.value())
+        resonance_only = self.resonance_only_check.isChecked()
+        new_only = self.new_only_check.isChecked()
+        quadrant_filter = self.quadrant_filter_combo.currentText()
+
+        for item in results or []:
+            direction = str(item.get('direction') or item.get('side') or '').upper()
+            if direction_filter != "全部方向" and direction != direction_filter:
+                continue
+
+            level = str(item.get('opportunity_level', '')).upper()
+            if level_filter != "全部等级" and level != level_filter:
+                continue
+
+            category = str(item.get('category', ''))
+            if category_filter != "全部类型" and category != category_filter:
+                continue
+
+            opportunity_score = float(item.get('opportunity_score', item.get('score', 0)) or 0)
+            if opportunity_score < min_score:
+                continue
+
+            if resonance_only and not bool(item.get('is_resonance', False)):
+                continue
+
+            if new_only and not bool(item.get('is_new_signal', False)):
+                continue
+
+            if quadrant_filter != "全部象限" and self._get_quadrant_name(item) != quadrant_filter:
+                continue
+
+            filtered.append(item)
+        return filtered
+
+    def _sort_filtered_results(self, results):
+        sort_mode = self.sort_combo.currentText()
+        if sort_mode == "按连续轮数":
+            return sorted(
+                results,
+                key=lambda item: (
+                    int(item.get('streak_count', 1)),
+                    int(item.get('resonance_count', 1)),
+                    float(item.get('opportunity_score', item.get('score', 0)) or 0),
+                ),
+                reverse=True,
+            )
+        if sort_mode == "按原始分数":
+            return sorted(
+                results,
+                key=lambda item: (int(item.get('resonance_count', 1)), float(item.get('score', 0) or 0)),
+                reverse=True,
+            )
+        if sort_mode == "按24H成交额":
+            return sorted(
+                results,
+                key=lambda item: (int(item.get('resonance_count', 1)), float(item.get('volume_24h', 0) or 0)),
+                reverse=True,
+            )
+        if sort_mode == "按24H涨跌幅":
+            return sorted(
+                results,
+                key=lambda item: (
+                    int(item.get('resonance_count', 1)),
+                    abs(float(item.get('price_change_24h', item.get('change_24h', 0)) or 0)),
+                ),
+                reverse=True,
+            )
+        if sort_mode == "按更新时间":
+            return sorted(
+                results,
+                key=lambda item: (
+                    int(item.get('resonance_count', 1)),
+                    str(item.get('updated_at', item.get('timestamp', '')))
+                ),
+                reverse=True,
+            )
+        return sorted(
+            sort_scan_results(results or []),
+            key=lambda item: (
+                int(item.get('resonance_count', 1)),
+                float(item.get('opportunity_score', item.get('score', 0)) or 0),
+                float(item.get('score', 0) or 0),
+            ),
+            reverse=True,
+        )
+
+    def _annotate_resonance(self, results):
+        annotated = [dict(item) for item in (results or [])]
+        symbol_counts = {}
+        symbol_strategies = {}
+        for item in annotated:
+            symbol = str(item.get('symbol', ''))
+            if not symbol:
+                continue
+            symbol_counts[symbol] = symbol_counts.get(symbol, 0) + 1
+            symbol_strategies.setdefault(symbol, set()).add(str(item.get('strategy_name', item.get('category', ''))))
+        for item in annotated:
+            symbol = str(item.get('symbol', ''))
+            count = symbol_counts.get(symbol, 1)
+            strategy_count = len(symbol_strategies.get(symbol, set()))
+            item['resonance_count'] = count
+            item['resonance_strategy_count'] = strategy_count
+            item['is_resonance'] = count > 1 or strategy_count > 1
+        return annotated
+
+    def _annotate_newness(self, results):
+        annotated = [dict(item) for item in (results or [])]
+        has_previous_snapshot = bool(self.previous_scan_keys)
+        for item in annotated:
+            result_key = self._result_identity_key(item)
+            item['is_new_signal'] = (result_key not in self.previous_scan_keys) if has_previous_snapshot else True
+            item['streak_count'] = int(self.previous_scan_streaks.get(result_key, 0)) + 1
+            item['quadrant'] = self._get_quadrant_name(item)
+        return annotated
+
+    def _merge_scan_results(self, existing_results, new_results):
+        merged = {}
+        for item in list(existing_results or []) + list(new_results or []):
+            key = self._result_identity_key(item)
+            merged[key] = item
+        return list(merged.values())
+
+    def _result_identity_key(self, item):
+        return (
+            item.get('symbol'),
+            item.get('category'),
+            item.get('strategy_name'),
+        )
+
+    def _get_quadrant_name(self, item):
+        is_new_signal = bool(item.get('is_new_signal', False))
+        is_resonance = bool(item.get('is_resonance', False))
+        if is_new_signal and is_resonance:
+            return "新出现且共振"
+        if is_new_signal and not is_resonance:
+            return "新出现但未共振"
+        if (not is_new_signal) and is_resonance:
+            return "连续强化且共振"
+        return "连续强化但未共振"
+
+    def _create_result_tab(self, category_name):
+        tab_widget = QWidget()
+        tab_layout = QVBoxLayout(tab_widget)
+        tab_layout.setContentsMargins(0, 0, 0, 0)
+        tab_layout.setSpacing(6)
+
+        stats_label = QLabel(self._format_result_stats(category_name, []))
+        stats_label.setTextFormat(Qt.TextFormat.RichText)
+        stats_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextBrowserInteraction)
+        stats_label.setOpenExternalLinks(False)
+        stats_label.linkActivated.connect(self._handle_stats_link)
+        stats_label.setStyleSheet("color: #8fd3ff; font-size: 12px; font-weight: bold; padding: 4px 2px;")
+        tab_layout.addWidget(stats_label)
+
+        table = self._create_result_table()
+        table.cellClicked.connect(
+            lambda row, column, current_table=table, current_category=category_name:
+            self._on_result_cell_clicked(current_table, current_category, row, column)
+        )
+        table.cellDoubleClicked.connect(
+            lambda row, column, current_table=table, current_category=category_name:
+            self._on_result_cell_double_clicked(current_table, current_category, row, column)
+        )
+        table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        table.customContextMenuRequested.connect(
+            lambda pos, current_table=table, current_category=category_name:
+            self._on_result_context_menu(current_table, current_category, pos)
+        )
+        tab_layout.addWidget(table)
+        return tab_widget, stats_label, table
+
+    def _create_result_table(self):
+        table = QTableWidget()
+        table.setColumnCount(len(self.RESULT_HEADERS))
+        table.setHorizontalHeaderLabels(self.RESULT_HEADERS)
+        table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        table.setAlternatingRowColors(True)
+        table.setStyleSheet("QTableWidget { background-color: #252526; color: #cccccc; }")
+        return table
+
+    def _clear_all_result_tables(self):
+        for table in self.result_tables.values():
+            # 禁用重绘再清空，避免每行触发一次布局重计算
+            table.setUpdatesEnabled(False)
+            try:
+                table.setRowCount(0)
+            finally:
+                table.setUpdatesEnabled(True)
+        for category_name in self.CATEGORY_TABS:
+            self._update_result_stats(category_name, [])
+
+    def _update_result_stats(self, category_name, items):
+        label = self.result_stats_labels.get(category_name)
+        if label is None:
+            return
+        label.setText(self._format_result_stats(category_name, items))
+
+    def _format_result_stats(self, category_name, items):
+        count = len(items)
+        if count == 0:
+            return f"{category_name} | 数量: 0 | 最高评分: - | 平均评分: - | 最强交易对: -"
+
+        scores = [float(item.get('opportunity_score', item.get('score', 0)) or 0) for item in items]
+        best_item = max(
+            items,
+            key=lambda item: float(item.get('opportunity_score', item.get('score', 0)) or 0)
+        )
+        max_score = max(scores)
+        avg_score = sum(scores) / count if count else 0.0
+        best_symbol = str(best_item.get('symbol', '-'))
+        escaped_symbol = escape(best_symbol)
+        highlight_link = f"highlight||{category_name}||{best_symbol}"
+        trade_link = f"trade||{category_name}||{best_symbol}"
+        backtest_link = f"backtest||{category_name}||{best_symbol}"
+        return (
+            f"{category_name} | 数量: {count} | 最高评分: {max_score:.1f} | "
+            f"平均评分: {avg_score:.1f} | 最强交易对: "
+            f"<a href=\"{highlight_link}\" style=\"color:#ffd166; text-decoration:none;\">{escaped_symbol}</a> "
+            f"[<a href=\"{trade_link}\" style=\"color:#7bd389; text-decoration:none;\">自动交易</a> / "
+            f"<a href=\"{backtest_link}\" style=\"color:#7aa6ff; text-decoration:none;\">回测</a>]"
+        )
+
+    def _handle_stats_link(self, link: str):
+        parts = str(link or "").split("||", 2)
+        if len(parts) != 3:
+            return
+        action, category_name, symbol = parts
+        if action == "highlight":
+            self._highlight_symbol(symbol, category_name)
+        elif action == "trade":
+            self._send_symbol_to_trade(symbol, category_name)
+        elif action == "backtest":
+            self._send_symbol_to_backtest(symbol, category_name)
+
+    def _highlight_symbol(self, symbol: str, category_name: str):
+        target_tab = category_name if category_name in self.result_tables else "总览"
+        table = self.result_tables.get(target_tab)
+        if table is None:
+            return
+        self.result_tabs.setCurrentWidget(table.parentWidget())
+        table.clearSelection()
+        for row in range(table.rowCount()):
+            item = table.item(row, 0)
+            if item and item.text() == symbol:
+                table.selectRow(row)
+                table.scrollToItem(item, QTableWidget.ScrollHint.PositionAtCenter)
+                return
+        QMessageBox.information(self, "提示", f"未在 {target_tab} 中找到 {symbol}")
+
+    def _send_symbol_to_trade(self, symbol: str, category_name: str):
+        self._highlight_symbol(symbol, category_name)
+        main_window = self.window()
+        if not hasattr(main_window, 'main_tabs') or not hasattr(main_window, 'pair_combo'):
+            QMessageBox.information(self, "提示", f"已高亮 {symbol}，但未找到自动交易页面入口")
+            return
+        main_window.pair_combo.setCurrentText(symbol)
+        main_window.main_tabs.setCurrentIndex(0)
+        QMessageBox.information(self, "已发送", f"{symbol} 已送入自动交易页面")
+
+    def _send_symbol_to_backtest(self, symbol: str, category_name: str):
+        self._highlight_symbol(symbol, category_name)
+        main_window = self.window()
+        backtest_page = getattr(main_window, 'backtest_page', None)
+        main_tabs = getattr(main_window, 'main_tabs', None)
+        if backtest_page is None or main_tabs is None or not hasattr(backtest_page, 'config_widget'):
+            QMessageBox.information(self, "提示", f"已高亮 {symbol}，但未找到回测页面入口")
+            return
+        backtest_page.config_widget.pair_combo.setCurrentText(symbol)
+        main_tabs.setCurrentWidget(backtest_page)
+        QMessageBox.information(self, "已发送", f"{symbol} 已送入回测页面")
+
+    def _on_result_cell_clicked(self, table, category_name: str, row: int, column: int):
+        if column != 0 or row < 0:
+            return
+        context = self._get_row_symbol_context(table, category_name, row)
+        if context is None:
+            return
+        _, symbol, actual_category = context
+        self._show_symbol_quick_menu(table, row, symbol, actual_category)
+
+    def _show_symbol_quick_menu(self, table, row: int, symbol: str, category_name: str):
+        menu = QMenu(self)
+        highlight_action = menu.addAction(f"高亮 {symbol}")
+        trade_action = menu.addAction(f"送入自动交易: {symbol}")
+        backtest_action = menu.addAction(f"送入回测: {symbol}")
+
+        anchor_item = table.item(row, 0)
+        if anchor_item is not None:
+            popup_pos = table.viewport().mapToGlobal(table.visualItemRect(anchor_item).center())
+        else:
+            popup_pos = table.mapToGlobal(table.rect().center())
+
+        selected_action = menu.exec(popup_pos)
+        if selected_action == highlight_action:
+            self._highlight_symbol(symbol, category_name)
+        elif selected_action == trade_action:
+            self._send_symbol_to_trade(symbol, category_name)
+        elif selected_action == backtest_action:
+            self._send_symbol_to_backtest(symbol, category_name)
+
+    def _on_result_cell_double_clicked(self, table, category_name: str, row: int, column: int):
+        context = self._get_row_symbol_context(table, category_name, row)
+        if context is None:
+            return
+        _, symbol, actual_category = context
+        self._send_symbol_to_backtest(symbol, actual_category)
+
+    def _on_result_context_menu(self, table, category_name: str, pos):
+        item = table.itemAt(pos)
+        if item is None:
+            return
+        row = item.row()
+        context = self._get_row_symbol_context(table, category_name, row)
+        if context is None:
+            return
+        _, symbol, actual_category = context
+        self._show_symbol_quick_menu_at(table, row, symbol, actual_category, table.viewport().mapToGlobal(pos))
+
+    def _show_symbol_quick_menu_at(self, table, row: int, symbol: str, category_name: str, global_pos):
+        menu = QMenu(self)
+        highlight_action = menu.addAction(f"高亮 {symbol}")
+        trade_action = menu.addAction(f"送入自动交易: {symbol}")
+        backtest_action = menu.addAction(f"送入回测: {symbol}")
+
+        selected_action = menu.exec(global_pos)
+        if selected_action == highlight_action:
+            self._highlight_symbol(symbol, category_name)
+        elif selected_action == trade_action:
+            self._send_symbol_to_trade(symbol, category_name)
+        elif selected_action == backtest_action:
+            self._send_symbol_to_backtest(symbol, category_name)
+
+    def _get_row_symbol_context(self, table, category_name: str, row: int):
+        if row < 0:
+            return None
+        symbol_item = table.item(row, 0)
+        if symbol_item is None:
+            return None
+        symbol = symbol_item.text().strip()
+        if not symbol:
+            return None
+        actual_category = category_name
+        if category_name == "总览":
+            category_item = table.item(row, 3)
+            if category_item and category_item.text().strip():
+                actual_category = category_item.text().strip()
+        return row, symbol, actual_category
+
+    def update_progress(self, val, msg, current_symbol, scanned, total, est_remaining):
+        """更新扫描进度显示"""
+        self.progress_bar.setValue(val)
+        progress_text = msg
+        if est_remaining:
+            progress_text = f"{msg} | 剩余 {est_remaining}"
+        self.scan_progress_label.setText(progress_text)
+        self.status_label.setText(f"进度: {val}%")
+        if val >= 100:
+            return
+
+        # 更新当前扫描的交易对
+        if current_symbol:
+            self.current_symbol_label.setText(f"📊 正在分析: {current_symbol}")
+        else:
+            self.current_symbol_label.setText("📊 正在分析: 市场截面与候选池")
+
+        # 更新进度统计
+        if scanned > 0 and total > 0:
+            self.scan_stats_label.setText(f"已完成: {scanned}/{total}")
+        elif total > 0:
+            self.scan_stats_label.setText(f"总数: {total}")
+        
+        # 更新实时日志 - 显示详细进度
+        log_msg = f"[{val}%] {msg}"
+        if current_symbol and total > 0:
+            log_msg += f" | 当前: {current_symbol} ({scanned}/{total})"
+        elif total > 0:
+            log_msg += f" | 进度: {scanned}/{total}"
+        self.scan_log_label.setText(f"📋 实时日志: {log_msg}")
+
+        # 向外广播进度（每 4 次发一条），同时携带进度数字供进度条使用
+        self._log_progress_counter = getattr(self, '_log_progress_counter', 0) + 1
+        if self._log_progress_counter % 4 == 1 or val >= 95:
+            detail = ""
+            if current_symbol and total > 0:
+                detail = f"  {current_symbol} ({scanned}/{total})"
+            elif total > 0:
+                detail = f"  {scanned}/{total}"
+            # 格式固定为 "[进度%|scanned|total] msg detail"，供外部解析进度条
+            self.scan_log_signal.emit(
+                f"[{val}%|{scanned}|{total}] {msg}{detail}",
+                "INFO",
+            )
+
+    def on_scan_error(self, err_msg):
+        """扫描错误回调"""
+        self.is_scanning = False
+        self.scan_btn.setEnabled(True)
+        self.progress_bar.setVisible(False)
+        self.status_label.setText(f"扫描出错: {err_msg}")
+        self.current_symbol_label.setText(f"❌ 扫描失败")
+        self.current_strategy_label.setText("策略: -")
+        self.scan_stats_label.setText("")
+        self.scan_progress_label.setText(f"错误: {err_msg}")
+        self.scan_log_signal.emit(f"❌ 扫描出错: {err_msg}", "ERROR")
+
+        # 安全清理线程引用（不阻塞 UI）
+        old_thread = getattr(self, '_scan_thread', None)
+        if old_thread is not None:
+            # 错误回调时线程可能仍在退出路径上，暂存僵尸列表保持引用
+            self._safe_discard_scan_thread(old_thread, wait_ms=200)
+            self._scan_thread = None
+
+        # 即使报错，如果队列里还有任务，也要继续执行下一个（延迟5秒）
+        if self.current_auto_strategies:
+            print(f"[on_scan_error] 扫描出错，5秒后尝试下一个策略...")
+            QTimer.singleShot(5000, self.start_next_auto_strategy)
+        else:
+            if self.auto_scan_enabled:
+                print(f"[on_scan_error] 扫描出错且队列为空，重置间隔...")
+                self.countdown_remaining = self.interval_spin.value() * 60

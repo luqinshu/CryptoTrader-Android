@@ -19,7 +19,9 @@ from telegram.ext import (
 from telegram.request import HTTPXRequest
 
 from src.api.okx_client import OKXClient
+from src.scanner.base_scanner import BaseScannerStrategy
 from src.scanner.engine import ScanEngine
+from src.scanner.ranking import enrich_scan_result, sort_scan_results
 from src.strategy.loader import StrategyLoader
 
 
@@ -56,8 +58,10 @@ class CryptoTraderBot:
         self.current_strategy = None
         self.scan_results = []
         
-        # 代理配置（中国用户需要）
-        proxy_url = "http://127.0.0.1:7897"
+        # 代理配置（通过 telegram_config.json 配置，默认不使用代理）
+        proxy_url = self.config.get("proxy_url", None)
+        if not proxy_url:
+            proxy_url = None  # 不使用代理
         
         # 初始化 Telegram 应用（v22 版本，带代理）
         self.application = (
@@ -448,6 +452,7 @@ class CryptoTraderBot:
                 })
                 
                 if result.get('passed'):
+                    enrich_scan_result(result)
                     results.append(result)
                     # 添加到交易对池
                     self._add_to_pool(result)
@@ -471,7 +476,7 @@ class CryptoTraderBot:
     def _send_scan_results(self, chat_id: int, results: List[Dict]):
         """发送扫描结果"""
         # 按得分排序
-        results.sort(key=lambda x: x.get('score', 0), reverse=True)
+        results = sort_scan_results(results)
         
         message = f"🎉 **扫描完成！**\n\n"
         message += f"📊 通过：**{len(results)}** 个交易对\n"
@@ -484,7 +489,7 @@ class CryptoTraderBot:
             message += f"{i}. **{symbol}**\n"
             message += f"   价格：{r.get('last_price', 0):.2f}\n"
             message += f"   24h涨跌：{r.get('price_change_24h', 0):+.2f}%\n"
-            message += f"   得分：{r.get('score', 0):.1f}\n"
+            message += f"   机会评分：{r.get('opportunity_score', r.get('score', 0)):.1f} ({r.get('opportunity_level', '-')})\n"
             message += f"   详情：{r.get('details', {})}\n\n"
         
         if len(results) > 10:
@@ -501,14 +506,19 @@ class CryptoTraderBot:
             self._send_message(chat_id, chunk)
     
     def _send_message(self, chat_id: int, text: str):
-        """发送消息到 Telegram"""
+        """发送消息到 Telegram（线程安全：复用主事件循环或使用同步请求）"""
         try:
-            import asyncio
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            loop.run_until_complete(
-                self.application.bot.send_message(chat_id=chat_id, text=text, parse_mode='Markdown')
-            )
+            # 使用同步 HTTP 请求替代 asyncio（避免跨线程 event loop 冲突）
+            import urllib.request, urllib.parse, json
+            url = f"https://api.telegram.org/bot{self.token}/sendMessage"
+            data = urllib.parse.urlencode({
+                'chat_id': chat_id,
+                'text': text[:4000],
+                'parse_mode': 'Markdown',
+            }).encode()
+            req = urllib.request.Request(url, data=data, method='POST')
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                pass
         except Exception as e:
             print(f"发送消息失败：{e}")
     
@@ -537,16 +547,21 @@ class CryptoTraderBot:
         pool = self._load_trading_pool()
         
         symbol = result.get('symbol', '')
-        # 检查是否已存在
-        if not any(p['symbol'] == symbol for p in pool):
+        direction = str(result.get('direction', '')).upper()
+        # 按 symbol+direction 去重（修复：之前只看 symbol 忽略方向）
+        if not any(p['symbol'] == symbol and str(p.get('direction','')).upper() == direction for p in pool):
             pool.append({
                 'time': datetime.now().strftime('%H:%M:%S'),
                 'symbol': symbol,
+                'direction': direction,
                 'price': result.get('last_price', 0),
                 'change': result.get('price_change_24h', 0),
                 'score': result.get('score', 0),
                 'strategy': self.current_strategy.__class__.__name__ if self.current_strategy else '未知'
             })
+            # 限制池大小 200
+            if len(pool) > 200:
+                pool = pool[-200:]
             self._save_trading_pool(pool)
     
     def _clear_trading_pool(self):

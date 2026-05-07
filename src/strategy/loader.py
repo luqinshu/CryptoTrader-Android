@@ -31,6 +31,59 @@ class StrategyInfo:
     config_schema: Dict[str, Any] = None
     module: Any = None
 
+    def create_instance(self, config: Dict[str, Any] = None) -> Optional[Any]:
+        """
+        从策略信息创建策略实例
+        
+        Args:
+            config: 策略配置字典
+            
+        Returns:
+            策略实例对象
+        """
+        try:
+            # 动态导入模块
+            spec = importlib.util.spec_from_file_location(self.name, self.path)
+            if spec is None or spec.loader is None:
+                return None
+            
+            module = importlib.util.module_from_spec(spec)
+            sys.modules[spec.name] = module
+            try:
+                spec.loader.exec_module(module)
+            except Exception as e:
+                del sys.modules[spec.name]
+                print(f"[策略加载] {file_path} 执行失败: {e}")
+                return None
+            self.module = module
+            
+            # 自动查找策略类
+            strategy_class = None
+            for name, obj in inspect.getmembers(module, inspect.isclass):
+                # 跳过导入的类
+                if obj.__module__ == module.__name__:
+                    # 优先查找包含 Strategy, Scanner 或 策略, 扫描器 的类名
+                    if any(keyword in name for keyword in ['Strategy', 'Scanner', '策略', '扫描器']):
+                        strategy_class = obj
+                        break
+            
+            # 如果没有找到，返回第一个自定义类
+            if not strategy_class:
+                for name, obj in inspect.getmembers(module, inspect.isclass):
+                    if obj.__module__ == module.__name__:
+                        strategy_class = obj
+                        break
+            
+            if strategy_class:
+                return strategy_class(config or {})
+            
+            return None
+        except Exception as e:
+            print(f"实例化策略 {self.name} 失败: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+
 
 class StrategyLoader:
     """策略加载器"""
@@ -45,6 +98,7 @@ class StrategyLoader:
         self.strategies_dir = strategies_dir
         self.strategies: Dict[str, StrategyInfo] = {}
         self.loaded_modules: Dict[str, Any] = {}
+        self._custom_paths: set = set()  # 通过文件对话框手动加载的路径集合
 
         if self.strategies_dir and not os.path.exists(self.strategies_dir):
             os.makedirs(self.strategies_dir)
@@ -57,9 +111,14 @@ class StrategyLoader:
             策略信息列表
         """
         if not self.strategies_dir:
-            return []
+            # 没有目录时直接返回已有策略（含手动加载的）
+            return list(self.strategies.values())
 
+        # 保留手动加载的自定义策略，清空目录扫描结果
+        custom_saved = {name: info for name, info in self.strategies.items()
+                        if info.path in self._custom_paths}
         self.strategies.clear()
+        self.strategies.update(custom_saved)
 
         # 扫描策略目录
         for root, dirs, files in os.walk(self.strategies_dir):
@@ -153,8 +212,11 @@ class StrategyLoader:
         # 1. 尝试查找 CONFIG_SCHEMA 变量
         import re
         
-        # 查找 CONFIG_SCHEMA = {...} (支持多行)
-        config_match = re.search(r'CONFIG_SCHEMA\s*=\s*(\{[\s\S]*?\n\})', content)
+        # 查找 CONFIG_SCHEMA = {...} 或 CONFIG_SCHEMA: Dict[...] = {...} (支持多行)
+        config_match = re.search(
+            r'CONFIG_SCHEMA(?:\s*:\s*[^=]+)?\s*=\s*(\{[\s\S]*?\n\})',
+            content,
+        )
         if config_match:
             try:
                 schema_str = config_match.group(1)
@@ -230,8 +292,13 @@ class StrategyLoader:
                 return None
 
             module = importlib.util.module_from_spec(spec)
-            sys.modules[strategy_name] = module
-            spec.loader.exec_module(module)
+            sys.modules[spec.name] = module
+            try:
+                spec.loader.exec_module(module)
+            except Exception as e:
+                del sys.modules[spec.name]
+                print(f"[策略加载] {strategy_name} 执行失败: {e}")
+                return None
 
             # 保存到已加载模块
             self.loaded_modules[strategy_name] = module
@@ -356,4 +423,5 @@ class StrategyLoader:
         strategy_info = self._analyze_strategy_file(file_path)
         if strategy_info:
             self.strategies[strategy_info.name] = strategy_info
+            self._custom_paths.add(os.path.abspath(file_path))
         return strategy_info

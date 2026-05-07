@@ -2,149 +2,55 @@ name: Build Android APK
 
 on:
   push:
-    branches: [ main, master ]
-    tags:
-      - 'v*'
-  pull_request:
-    branches: [ main, master ]
-  workflow_dispatch:  # 允许手动触发
+    branches: [main, master]
+  workflow_dispatch:
 
 jobs:
   build-android:
-    name: Build Android APK
+    name: Build Android APK (Debug)
     runs-on: ubuntu-latest
-    
+
     steps:
     - name: Checkout code
-      uses: actions/checkout@v3
-    
-    - name: Set up Python
-      uses: actions/setup-python@v4
+      uses: actions/checkout@v4
+
+    - name: Set up Python 3.11
+      uses: actions/setup-python@v5
       with:
-        python-version: '3.10'
-    
+        python-version: '3.11'
+
     - name: Install system dependencies
       run: |
-        sudo apt-get update
-        sudo apt-get install -y \
-          build-essential \
-          git \
-          ffmpeg \
-          libsdl2-dev \
-          libsdl2-image-dev \
-          libsdl2-mixer-dev \
-          libsdl2-ttf-dev \
-          libportmidi-dev \
-          libswscale-dev \
-          libavformat-dev \
-          libavcodec-dev \
-          zlib1g-dev \
-          libgstreamer1.0 \
-          gstreamer1.0-plugins-base \
-          gstreamer1.0-plugins-good \
-          openjdk-17-jdk \
-          autoconf \
-          automake \
-          libtool
-    
-    - name: Install Python dependencies
+        sudo apt-get update -qq
+        sudo apt-get install -y -qq \
+          build-essential git autoconf automake libtool pkg-config cmake \
+          openjdk-17-jdk-headless \
+          libltdl-dev libffi-dev libssl-dev \
+          python3-dev python3-venv
+
+    - name: Install Python tools
       run: |
         python -m pip install --upgrade pip
-        pip install buildozer cython
-    
-    - name: Cache Buildozer global cache
-      uses: actions/cache@v3
-      with:
-        path: |
-          ~/.buildozer
-          ~/.cache/pip
-        key: ${{ runner.os }}-buildozer-global-${{ hashFiles('**/buildozer_android.spec') }}
-        restore-keys: |
-          ${{ runner.os }}-buildozer-global-
-    
-    - name: Cache Buildozer local cache
-      uses: actions/cache@v3
-      with:
-        path: |
-          .buildozer
-        key: ${{ runner.os }}-buildozer-local-${{ github.sha }}
-        restore-keys: |
-          ${{ runner.os }}-buildozer-local-
-    
-    - name: Pre-download Android SDK (optional, speeds up build)
-      run: |
-        echo "Android SDK will be downloaded during buildozer build"
-    
-    - name: Build APK with Buildozer
-      run: |
-        # 使用配置文件
-        cp buildozer_android.spec buildozer.spec
-        
-        # 开始打包
-        buildozer -v android debug
-        
+        pip install buildozer cython setuptools
+
+    - name: Build APK
+      working-directory: android
+      run: buildozer -v android debug
       env:
-        # 增加超时时间
         BUILDOZER_ALLOW_ROOT: 1
-    
+
     - name: Upload APK artifact
       if: success()
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
-        name: CryptoScannerPro-Debug-APK
-        path: bin/*.apk
+        name: CryptoScannerPro-Debug
+        path: android/bin/*.apk
         retention-days: 30
-    
+
     - name: Upload build logs
       if: always()
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: build-logs
-        path: |
-          .buildozer/android/platform/build/build.log
-          *.log
+        path: android/.buildozer/android/platform/build/build.log
         retention-days: 7
-    
-    - name: Create Release
-      if: startsWith(github.ref, 'refs/tags/')
-      uses: softprops/action-gh-release@v1
-      with:
-        files: bin/*.apk
-        body_path: ANDROID_BUILD_GUIDE.md
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-  # 可选：构建发布版本（签名）
-  build-release:
-    name: Build Release APK (Optional)
-    runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/')
-    needs: build-android
-    
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v3
-    
-    - name: Set up Python
-      uses: actions/setup-python@v4
-      with:
-        python-version: '3.10'
-    
-    - name: Install dependencies
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y build-essential git openjdk-17-jdk
-        pip install buildozer cython
-    
-    - name: Build Release APK
-      run: |
-        cp buildozer_android.spec buildozer.spec
-        buildozer -v android release
-      env:
-        BUILDOZER_ALLOW_ROOT: 1
-    
-    - name: Upload Release APK
-      uses: actions/upload-artifact@v3
-      with:
-        name: CryptoScannerPro-Release-APK
-        path: bin/*.apk

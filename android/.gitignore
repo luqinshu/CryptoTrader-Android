@@ -1,0 +1,25 @@
+# Buildozer
+.buildozer/
+bin/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+venv313/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Config with secrets
+scanner_config.json
+android/fonts/PingFang.ttc

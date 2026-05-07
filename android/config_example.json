@@ -1,0 +1,7 @@
+{
+  "api_key": "YOUR_API_KEY_HERE",
+  "secret_key": "YOUR_SECRET_KEY_HERE",
+  "passphrase": "YOUR_PASSPHRASE_HERE",
+  "testnet": false,
+  "proxy_url": ""
+}

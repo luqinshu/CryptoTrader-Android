@@ -1,0 +1,994 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+AI截面五引擎组合扫描器 v3
+
+一次扫描同时运行五个互补策略并合成多引擎共振：
+  1. 截面多因子加密货币扫描4_23_v3   — 全市场截面 z-score 排序 + 链上 + 正交化 + IC半衰期
+  2. AI因子挖掘加密货币扫描策略4_23_v3 — Chain-of-Alpha: LLM/社交/链上/技术多因子
+  3. DRL元学习小时趋势启动扫描策略4_23_v2 — DQN/A2C/SAC + 元学习 + 小时趋势启动
+  4. XGBoost截面排序策略4_27_v2       — XGBoost Ranker 非线性因子交互 + 延迟标签
+  5. AI订单流动量突破组合策略4_27_v2  — 订单簿不平衡 + 动量交互 + BTC价差 + VWAP
+
+v2 → v3 修复 & 改动
+─────────────────────────────────────────────────────
+1. CHILDREN 文件名全部修正为实际文件名（点号格式），
+   原 v2 和 v3 文件中用下划线（4_23_v3 vs 4.23_v3）导致所有子策略路径查找失败。
+
+2. CONFIG_SCHEMA 新增 XGBoost 专属参数（xgb_*）和
+   订单流专属参数（orderflow_weight / enable_btc_spread 等），
+   确保组合层可以统一配置并正确透传。
+
+3. _child_config 扩展透传表：
+   - XGBoost 策略透传 xgb_* 参数
+   - 订单流策略透传 orderflow_weight / enable_orderflow /
+     enable_btc_spread / interact_weight 等专属参数
+
+4. 新增独立共振加分配置键：
+   quadruple_consensus_bonus（四引擎，默认15.5）
+   quintuple_consensus_bonus（五引擎，默认18.0）
+   避免复用 triple_consensus_bonus 语义混乱。
+
+5. _build_consensus_result 中 base_score 状态权重计算公式修正：
+   原 `weighted/weight_sum * len(items)/weight_sum` 连除两次
+   weight_sum，量纲错误。v3 改为 `weighted/weight_sum`。
+
+6. scan_symbol 无结果时文字从"三个子策略均未触发"→"五引擎均未触发"。
+
+7. STRATEGY_NAME / STRATEGY_CLASS 导出名更新为五引擎版本。
+─────────────────────────────────────────────────────
+"""
+
+from __future__ import annotations
+
+import importlib.util
+import re
+import sys
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+
+import numpy as np
+import pandas as pd
+
+try:
+    from src.scanner.base_scanner import BaseScannerStrategy, ScanCondition, ScannerSymbol
+    from src.scanner.ranking import build_opportunity_profile, enrich_scan_result
+    _HAS_SCANNER_BASE = True
+except Exception:
+    BaseScannerStrategy = object
+    ScanCondition = None
+    ScannerSymbol = Any
+    build_opportunity_profile = None
+    enrich_scan_result = None
+    _HAS_SCANNER_BASE = False
+
+
+CONFIG_SCHEMA = {
+    # ── 基础 ──
+    "min_volume_24h":               {"type": "float", "default": 8_000_000.0, "label": "组合最小24H成交额"},
+    "min_score":                    {"type": "float", "default": 83.0,        "label": "子策略最低扫描分数"},
+    "backtest_min_score":           {"type": "float", "default": 75.0,        "label": "回测最低入场分数"},
+    "top_n":                        {"type": "int",   "default": 12,          "label": "组合最多输出"},
+    "top_n_per_strategy":           {"type": "int",   "default": 6,           "label": "每个子策略最多输出"},
+    "include_individual_results":   {"type": "bool",  "default": True,        "label": "保留子策略单独结果"},
+    "include_consensus_results":    {"type": "bool",  "default": True,        "label": "输出多策略共振结果"},
+    "dedupe_by_symbol":             {"type": "bool",  "default": True,        "label": "按交易对去重仅保留最高分"},
+    "allow_short":                  {"type": "bool",  "default": True,        "label": "允许空头"},
+    "max_atr_pct":                  {"type": "float", "default": 8.0,         "label": "最大ATR%"},
+    # ── 共振 ──
+    "min_consensus_engines":        {"type": "int",   "default": 2,           "label": "最少共振引擎数"},
+    "consensus_bonus":              {"type": "float", "default": 8.5,         "label": "双引擎共振加分"},
+    "triple_consensus_bonus":       {"type": "float", "default": 13.0,        "label": "三引擎共振加分"},
+    "direction_conflict_penalty":   {"type": "float", "default": 8.0,         "label": "方向冲突降分"},
+    # ── AI因子挖掘子策略 ──
+    "min_abs_edge":                 {"type": "float", "default": 0.24,        "label": "AI策略最小优势"},
+    "use_dynamic_ic_weights":       {"type": "bool",  "default": True,        "label": "启用动态IC权重"},
+    "ic_weight_blend":              {"type": "float", "default": 0.55,        "label": "IC权重混合比例"},
+    "enable_mfin_interactions":     {"type": "bool",  "default": True,        "label": "AI策略启用交互项"},
+    "enable_llm_factors":           {"type": "bool",  "default": True,        "label": "AI策略启用LLM/社交因子"},
+    "enable_on_chain":              {"type": "bool",  "default": True,        "label": "启用链上因子"},
+    # ── 截面多因子子策略 ──
+    "use_orthogonalization":        {"type": "bool",  "default": True,        "label": "截面策略启用因子正交化"},
+    # ── 早启动因子（DRL+AI共用）──
+    "enable_early_trend_factors":   {"type": "bool",  "default": True,        "label": "启用小时级早启动/转折因子"},
+    "early_trend_min_trigger":      {"type": "float", "default": 0.18,        "label": "早启动最低触发强度"},
+    # ── 3m 回调企稳 ──
+    "require_m3_pullback_confirmation": {"type": "bool",  "default": True,   "label": "要求3分钟回调企稳续势"},
+    "m3_pullback_min_pct":          {"type": "float", "default": 0.50,        "label": "3分钟最小回调幅度%"},
+    "m3_pullback_max_pct":          {"type": "float", "default": 2.20,        "label": "3分钟最大回调幅度%"},
+    "m3_stabilization_bars":        {"type": "int",   "default": 4,           "label": "3分钟企稳确认根数"},
+    "require_m3_freshness":         {"type": "bool",  "default": False,       "label": "必须通过3m时效性检查"},
+    "m3_min_impulse_pct":           {"type": "float", "default": 0.65,        "label": "3m最小原趋势脉冲%"},
+    "vol_continuation_min_ratio":   {"type": "float", "default": 0.78,        "label": "企稳量能续航最低比例"},
+    # ── v3.2 微观结构 ──
+    "enable_atr_squeeze_check":     {"type": "bool",  "default": True,        "label": "启用ATR收缩检测"},
+    "atr_squeeze_ratio":            {"type": "float", "default": 0.55,        "label": "ATR收缩比例"},
+    "enable_volume_delta_check":    {"type": "bool",  "default": True,        "label": "启用买卖力量检测"},
+    "volume_delta_min_ratio":       {"type": "float", "default": 1.15,        "label": "买卖量最低比值"},
+    "enable_vwap_alignment_check":  {"type": "bool",  "default": True,        "label": "启用VWAP对齐检测"},
+    # ── 时效性过滤（v2 新增，三子策略共用）──
+    "max_h1_trend_age":             {"type": "int",   "default": 12,          "label": "1H趋势最大延续根数（超过则惩罚）"},
+    "h1_trend_age_penalty":         {"type": "float", "default": 8.0,         "label": "趋势过老分数惩罚"},
+    "max_m3_staleness_bars":        {"type": "int",   "default": 15,          "label": "3m回调最大时效根数"},
+    "m3_freshness_penalty":         {"type": "float", "default": 6.0,         "label": "3m回调过旧分数惩罚"},
+    "bonus_freshness_score":        {"type": "float", "default": 3.0,         "label": "两项时效均通过时加分"},
+    "hard_entry_timing_filter":     {"type": "bool",  "default": True,        "label": "硬过滤: 仅保留1H早启动+3m回调企稳"},
+    "hard_max_h1_trend_age":        {"type": "int",   "default": 4,           "label": "硬过滤: 1H趋势最大延续根数"},
+    # ── 性能 / 模式 ──
+    "position_size":                {"type": "float", "default": 0.10,        "label": "回测仓位比例"},
+    "mode": {
+        "type": "select", "default": "normal", "label": "扫描模式",
+        "options": [{"label": "常规", "value": "normal"}, {"label": "超严", "value": "ultra"}],
+    },
+    "ultra_strict_mode":            {"type": "bool",  "default": False,       "label": "超严模式(目标6-9条)"},
+    "ultra_target_top_n":           {"type": "int",   "default": 9,           "label": "超严模式最大输出"},
+    "parallel_child_engines":       {"type": "bool",  "default": False,       "label": "并行运行子引擎"},
+    "fast_scan_mode":               {"type": "bool",  "default": False,       "label": "启用快速候选池"},
+    "max_scan_symbols":             {"type": "int",   "default": 80,          "label": "快速候选池上限"},
+    "drl_candidate_cap":            {"type": "int",   "default": 60,          "label": "DRL子引擎候选池上限"},
+    "profile_child_timing":         {"type": "bool",  "default": True,        "label": "输出子引擎耗时"},
+    "accelerate_cross_section_child": {"type": "bool","default": True,        "label": "组合内启用截面子引擎加速"},
+    "accel_disable_m3":             {"type": "bool",  "default": False,       "label": "加速模式下关闭3m企稳检查"},
+    # ── XGBoost子策略专属 ──
+    "xgb_max_depth":              {"type":"int",  "default":5,    "label":"XGB树最大深度"},
+    "xgb_n_estimators":          {"type":"int",  "default":120,  "label":"XGB树数量"},
+    "xgb_learning_rate":         {"type":"float","default":0.05, "label":"XGB学习率"},
+    "xgb_subsample":             {"type":"float","default":0.75, "label":"XGB样本采样"},
+    "xgb_colsample_bytree":      {"type":"float","default":0.75, "label":"XGB特征采样"},
+    "xgb_reg_alpha":             {"type":"float","default":1.0,  "label":"XGB L1正则"},
+    "xgb_reg_lambda":            {"type":"float","default":2.0,  "label":"XGB L2正则"},
+    "xgb_min_child_weight":      {"type":"int",  "default":3,    "label":"XGB最小叶子权重"},
+    "xgb_retrain_hours":         {"type":"int",  "default":24,   "label":"XGB重训间隔(小时)"},
+    "xgb_min_samples":           {"type":"int",  "default":500,  "label":"XGB最少训练样本"},
+    "xgb_fallback_weight":       {"type":"float","default":0.30, "label":"XGB未训练线性权重"},
+    "xgb_trained_weight":        {"type":"float","default":0.75, "label":"XGB已训练模型权重"},
+    "xgb_label_delay_bars":      {"type":"int",  "default":24,   "label":"XGB标签延迟(1H根数)"},
+    # ── 订单流子策略专属 ──
+    "enable_orderflow":          {"type":"bool", "default":True,  "label":"启用订单簿不平衡"},
+    "orderflow_weight":          {"type":"float","default":0.18,  "label":"订单流因子权重"},
+    "enable_momentum_interact":  {"type":"bool", "default":True,  "label":"启用动量多项式交互"},
+    "interact_weight":           {"type":"float","default":0.22,  "label":"交互项因子权重"},
+    "enable_btc_spread":         {"type":"bool", "default":True,  "label":"启用BTC价差偏离"},
+    "btc_spread_weight":         {"type":"float","default":0.15,  "label":"BTC价差因子权重"},
+    "btc_spread_z_entry":        {"type":"float","default":1.5,   "label":"BTC价差z-score入场阈值"},
+    "coint_significance":        {"type":"float","default":0.05,  "label":"协整显著性水平"},
+    # ── 五引擎独立共振加分 ──
+    "quadruple_consensus_bonus": {"type":"float","default":15.5, "label":"四引擎共振加分"},
+    "quintuple_consensus_bonus": {"type":"float","default":18.0, "label":"五引擎共振加分"},
+    # v4.0 新增
+    "enable_state_conditional_weights": {"type":"bool","default":True, "label": "启用市场状态条件权重"},
+}
+
+_DEFAULT_CONFIG = {key: spec["default"] for key, spec in CONFIG_SCHEMA.items()}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+class AICrossSectionDualFactorComboScanner(BaseScannerStrategy if _HAS_SCANNER_BASE else object):
+    """截面多因子 + AI因子挖掘 + DRL小时趋势启动 + XGBoost + 订单流 五引擎组合。"""
+
+    required_bars = ["3m", "15m", "1H", "4H", "1D"]
+    requires_derivative_metrics = True
+    requires_on_chain_metrics = True
+    name = "AI截面五引擎组合扫描器"
+    description = "五引擎共振：截面多因子 + AI因子挖掘 + DRL小时趋势 + XGBoost排序 + 订单流动量"
+    strategy_type = "scan"
+
+    CHILDREN = [
+        ("截面多因子",      "截面多因子加密货币扫描4.23_v3.py",      "ACrossSectionalMultiFactorScannerStrategy", 970),
+        ("AI因子挖掘",      "AI因子挖掘加密货币扫描策略4.23_v3.py",  "AIAutomatedAlphaCryptoScannerStrategy",     960),
+        ("DRL小时趋势启动", "DRL元学习小时趋势启动扫描策略4.23_v2.py","DRLMetaHourlyTrendStartScannerStrategy",    965),
+        ("XGBoost截面排序", "XGBoost截面排序策略4.27_v2.py",          "XGBoostCrossSectionalRanker",               955),
+        ("AI订单流动量",    "AI订单流动量突破组合策略4.27_v2.py",     "AIOrderflowMomentumBreakoutScanner",        945),
+    ]
+
+    def __init__(self, config: Optional[Dict[str, Any]] = None):
+        self.config = {**_DEFAULT_CONFIG, **(config or {})}
+        self._apply_runtime_modes()
+        self.child_strategies: List[Tuple[str, Any, int]] = []
+        self.last_child_results: Dict[str, List[Dict[str, Any]]] = {}
+        self.last_child_timing: Dict[str, float] = {}
+        self._synced = False  # v2: 防止 _sync_config 重复清空子策略缓存
+        if _HAS_SCANNER_BASE and hasattr(super(), "__init__"):
+            try:
+                super().__init__(self.config)
+            except Exception:
+                pass
+        self.child_strategies = self._build_child_strategies()
+
+    def _init_conditions(self):
+        if ScanCondition is None or not hasattr(self, "add_condition"):
+            return
+        self.add_condition(ScanCondition(
+            name="组合流动性", description="过滤成交额不足的交易对",
+            field="volume_24h", operator=">=",
+            value=self.config.get("min_volume_24h", 8_000_000.0),
+        ))
+
+    def get_config_schema(self) -> Dict[str, Any]:
+        return dict(CONFIG_SCHEMA)
+
+    # ── 单标的扫描 ──────────────────────────────────────────────────────────
+    def scan_symbol(self, symbol) -> Dict[str, Any]:
+        child_results = []
+        for strategy_name, strategy, priority in self.child_strategies:
+            try:
+                result = strategy.scan_symbol(symbol)
+            except Exception as exc:
+                print(f"[组合] {strategy_name} -> {getattr(symbol,'inst_id','')} 失败: {exc}")
+                continue
+            normalized = self._annotate_child_result(result, strategy_name, priority)
+            if normalized.get("passed"):
+                child_results.append(normalized)
+
+        consensus = self._build_consensus_result(getattr(symbol, "inst_id", ""), child_results)
+        candidates = ([consensus] if consensus else []) + child_results
+        if candidates:
+            candidates.sort(key=_result_sort_key, reverse=True)
+            return candidates[0]
+        return {
+            "symbol": getattr(symbol, "inst_id", ""),
+            "passed": False, "score": 0.0, "direction": "WAIT",
+            "category": "AI截面组合观察",
+            "details": {"状态": "五引擎均未触发"},
+        }
+
+    # ── 批量扫描 ─────────────────────────────────────────────────────────────
+    def scan_all_symbols(self, symbols: List) -> Dict[str, Any]:
+        top_n_per = int(self.config.get("top_n_per_strategy", 6) or 6)
+        scan_symbols = self._select_scan_universe(symbols)
+        all_child: List[Dict[str, Any]] = []
+        by_strategy: Dict[str, List[Dict[str, Any]]] = {}
+        timing: Dict[str, float] = {}
+
+        if bool(self.config.get("parallel_child_engines", False)) and len(self.child_strategies) > 1:
+            with ThreadPoolExecutor(max_workers=min(5, len(self.child_strategies))) as exc:
+                futures = {
+                    exc.submit(self._timed_child_scan, sn, st, pri, scan_symbols): (sn, pri)
+                    for sn, st, pri in self.child_strategies
+                }
+                for future in as_completed(futures):
+                    sn, _ = futures[future]
+                    try:
+                        results, elapsed = future.result()
+                    except Exception as e:
+                        print(f"[组合] {sn} 并行扫描失败: {e}")
+                        results, elapsed = [], 0.0
+                    timing[sn] = round(float(elapsed), 3)
+                    results.sort(key=_result_sort_key, reverse=True)
+                    by_strategy[sn] = results[:top_n_per]
+                    all_child.extend(results[:top_n_per])
+        else:
+            for sn, st, pri in self.child_strategies:
+                results, elapsed = self._timed_child_scan(sn, st, pri, scan_symbols)
+                timing[sn] = round(float(elapsed), 3)
+                results.sort(key=_result_sort_key, reverse=True)
+                by_strategy[sn] = results[:top_n_per]
+                all_child.extend(results[:top_n_per])
+                # 让出 CPU，避免低配机器转圈
+                import time as _t
+                _t.sleep(0.05)
+
+        consensus_results = []
+        if bool(self.config.get("include_consensus_results", True)):
+            consensus_results = self._build_consensus_results(all_child)
+
+        output: List[Dict[str, Any]] = []
+        if bool(self.config.get("include_consensus_results", True)):
+            output.extend(consensus_results)
+        if bool(self.config.get("include_individual_results", True)):
+            output.extend(all_child)
+
+        output = _dedupe_results(output, dedupe_by_symbol=bool(self.config.get("dedupe_by_symbol", True)))
+        output.sort(key=_result_sort_key, reverse=True)
+        top_n = int(self.config.get("top_n", 12) or 12)
+        final = output[:top_n]
+        self.last_child_results = by_strategy
+        self.last_child_timing = timing
+        return {
+            "type": "ai_cross_section_triple_engine_combo",
+            "all_opportunities": final,
+            "child_counts": {n: len(v) for n, v in by_strategy.items()},
+            "consensus_count": len(consensus_results),
+            "dedupe_by_symbol": bool(self.config.get("dedupe_by_symbol", True)),
+            "ultra_strict_mode": bool(self.config.get("ultra_strict_mode", False)),
+            "scanned_symbols": len(scan_symbols),
+            "input_symbols": len(symbols),
+            "parallel_child_engines": bool(self.config.get("parallel_child_engines", False)),
+            "child_timing_sec": timing if bool(self.config.get("profile_child_timing", True)) else {},
+        }
+
+    # ── 回测信号 ─────────────────────────────────────────────────────────────
+    def generate_signal(self, data, *args, **kwargs):
+        state_mode = self._normalize_state_mode(kwargs.pop("state_mode", None))
+        inferred_state = self._infer_market_state_from_data(data)
+        active_state = inferred_state if state_mode == "auto" else state_mode
+
+        signals = []
+        for sn, st, pri in self.child_strategies:
+            if not hasattr(st, "generate_signal"):
+                continue
+            try:
+                sig = st.generate_signal(data, *args, **kwargs)
+            except Exception as e:
+                print(f"[组合] {sn} 回测信号失败: {e}")
+                continue
+            if not sig:
+                continue
+            norm = dict(sig)
+            norm["source_strategy"] = sn
+            norm["_priority"] = pri
+            norm["_action_norm"] = "SHORT" if str(norm.get("action", "")).upper() == "SELL" else str(norm.get("action", "")).upper()
+            base = float(norm.get("score", 0.0) or 0.0)
+            bonus, mult = self._state_adjustment(sn, active_state)
+            norm["score"] = max(0.0, min(100.0, (base + bonus) * mult))
+            norm["_base_score"] = base
+            signals.append(norm)
+
+        if not signals:
+            return None
+        signals.sort(key=lambda x: (float(x.get("score", 0) or 0), int(x.get("_priority", 0) or 0)), reverse=True)
+
+        min_consensus = int(self.config.get("min_consensus_engines", 2) or 2)
+        pool = [s for s in signals if s.get("_action_norm") in {"BUY", "SHORT"}]
+        counts: Dict[str, int] = {}
+        for s in pool:
+            a = str(s.get("_action_norm", ""))
+            counts[a] = counts.get(a, 0) + 1
+
+        if counts:
+            best_action = max(counts, key=counts.get)
+            support = counts.get(best_action, 0)
+        else:
+            best_action, support = "", 0
+
+        if best_action in {"BUY", "SHORT"} and support >= min_consensus:
+            aligned = [s for s in pool if s.get("_action_norm") == best_action]
+            best = max(aligned, key=lambda s: float(s.get("score", 0) or 0))
+            base_avg = sum(float(s.get("score", 0) or 0) for s in aligned) / len(aligned)
+            if support >= 5:
+                rb = float(self.config.get("quintuple_consensus_bonus", 18.0) or 18.0)
+                rl = "五引擎同向最强共振"
+            elif support >= 4:
+                rb = float(self.config.get("quadruple_consensus_bonus", 15.5) or 15.5)
+                rl = "四引擎同向强共振"
+            elif support >= 3:
+                rb = float(self.config.get("triple_consensus_bonus", 13.0) or 13.0)
+                rl = "三引擎强共振"
+            elif len(pool) > support:
+                rb = float(self.config.get("consensus_bonus", 8.5) or 8.5) * 0.72
+                rl = "多引擎多数共振"
+            else:
+                rb = float(self.config.get("consensus_bonus", 8.5) or 8.5)
+                rl = "双引擎同向共振"
+            if active_state == "trend": rb += 1.4
+            elif active_state == "range": rb += 0.8
+            elif active_state == "volatile": rb -= 1.0
+            score = min(100.0, max(0.0, base_avg + rb))
+            return {
+                "action": best_action,
+                "position_size": float(self.config.get("position_size", 0.10) or 0.10),
+                "entry_price": float(best.get("entry_price", 0.0) or 0.0),
+                "reason": f"{rl} | {score:.1f} | " + " / ".join(s["source_strategy"] for s in aligned) + f" | 状态={active_state}",
+                "score": score, "raw_signals": signals,
+                "consensus_engines": support, "state_mode": state_mode,
+                "market_state": active_state, "inferred_market_state": inferred_state,
+            }
+
+        best = signals[0]
+        if float(best.get("score", 0) or 0) < float(self.config.get("backtest_min_score", 75.0) or 75.0):
+            return None
+        best = dict(best)
+        best.update({"state_mode": state_mode, "market_state": active_state, "inferred_market_state": inferred_state})
+        return best
+
+    def reset_backtest_state(self):
+        for _, st, _ in self.child_strategies:
+            if hasattr(st, "reset_backtest_state"):
+                try: st.reset_backtest_state()
+                except Exception: pass
+        self.last_child_results.clear()
+        self._synced = False
+
+    # ── 内部方法 ─────────────────────────────────────────────────────────────
+    def _apply_runtime_modes(self) -> None:
+        mode = str(self.config.get("mode", "normal")).strip().lower()
+        ultra = bool(self.config.get("ultra_strict_mode", False)) or mode in {"1","ultra","ultra_strict","strict","超严"}
+        if not ultra:
+            self.config["ultra_strict_mode"] = False
+            self.config["mode"] = "normal"
+            return
+        self.config["ultra_strict_mode"] = True
+        self.config["mode"] = "ultra"
+        tn = max(6, min(9, int(self.config.get("ultra_target_top_n", 9) or 9)))
+        self.config["min_score"] = max(float(self.config.get("min_score", 83.0) or 83.0), 86.0)
+        self.config["backtest_min_score"] = max(float(self.config.get("backtest_min_score", 75.0) or 75.0), 78.0)
+        self.config["top_n"] = min(int(self.config.get("top_n", tn) or tn), tn)
+        self.config["top_n_per_strategy"] = min(int(self.config.get("top_n_per_strategy", 6) or 6), 5)
+        self.config["min_consensus_engines"] = max(int(self.config.get("min_consensus_engines", 2) or 2), 2)
+        self.config["direction_conflict_penalty"] = max(float(self.config.get("direction_conflict_penalty", 8.0) or 8.0), 9.0)
+        self.config["include_consensus_results"] = True
+        self.config["dedupe_by_symbol"] = True
+
+    def _select_scan_universe(self, symbols: List) -> List:
+        if not bool(self.config.get("fast_scan_mode", True)):
+            return list(symbols)
+        limit = int(self.config.get("max_scan_symbols", 200) or 200)
+        if limit <= 0 or len(symbols) <= limit:
+            return list(symbols)
+        return sorted(symbols, key=self._scan_universe_score, reverse=True)[:limit]
+
+    def _scan_universe_score(self, symbol) -> float:
+        vol = _safe_number(getattr(symbol, "volume_24h", 0.0))
+        chg = abs(_safe_number(getattr(symbol, "price_change_24h", 0.0)))
+        klines = getattr(symbol, "extra_data", {}).get("klines", {}) if getattr(symbol, "extra_data", None) else {}
+        kb = sum(1.0 for bar in ("15m","1H","4H","1D") if klines.get(bar)) * 3.0
+        h1m = _recent_kline_move_pct(klines.get("1H"))
+        m15m = _recent_kline_move_pct(klines.get("15m"))
+        return (min(np.log10(max(vol,1.0)),11.0)*8 + min(chg,40.0)*1.8
+                + min(abs(h1m),30.0)*2.4 + min(abs(m15m),20.0)*1.2 + kb)
+
+    def _select_child_symbols(self, strategy_name: str, symbols: List) -> List:
+        if strategy_name != "DRL小时趋势启动":
+            return list(symbols)
+        cap = int(self.config.get("drl_candidate_cap", 180) or 180)
+        if cap <= 0 or len(symbols) <= cap:
+            return list(symbols)
+        return sorted(symbols, key=self._drl_candidate_score, reverse=True)[:cap]
+
+    def _drl_candidate_score(self, symbol) -> float:
+        vol = _safe_number(getattr(symbol, "volume_24h", 0.0))
+        chg = abs(_safe_number(getattr(symbol, "price_change_24h", 0.0)))
+        klines = (getattr(symbol, "extra_data", {}) or {}).get("klines", {})
+        h1m = _recent_kline_move_pct(klines.get("1H"), 6)
+        m15m = _recent_kline_move_pct(klines.get("15m"), 8)
+        return min(np.log10(max(vol,1.0)),11.0)*8 + min(chg,40.0)*2.5 + min(abs(h1m),30.0)*3 + min(abs(m15m),20.0)*1.5
+
+    def _timed_child_scan(self, sn, st, pri, symbols):
+        child_syms = self._select_child_symbols(sn, symbols)
+        t0 = time.perf_counter()
+        results = self._run_child_scan(sn, st, pri, child_syms)
+        return results, time.perf_counter() - t0
+
+    def _run_child_scan(self, sn, st, pri, symbols):
+        results = []
+        try:
+            if hasattr(st, "scan_all_symbols") and callable(st.scan_all_symbols):
+                batch = st.scan_all_symbols(symbols)
+                for item in (batch.get("all_opportunities", []) if isinstance(batch, dict) else []):
+                    norm = self._annotate_child_result(item, sn, pri)
+                    if norm.get("passed"):
+                        results.append(norm)
+                return results
+        except Exception as e:
+            print(f"[组合] {sn} 批量扫描失败，降级逐个: {e}")
+        for sym in symbols:
+            try:
+                item = st.scan_symbol(sym)
+            except Exception as e:
+                print(f"[组合] {sn} -> {getattr(sym,'inst_id','')} 失败: {e}")
+                continue
+            norm = self._annotate_child_result(item, sn, pri)
+            if norm.get("passed"):
+                results.append(norm)
+        return results
+
+    def _annotate_child_result(self, result, sn, priority):
+        norm = dict(result or {})
+        if not norm:
+            return norm
+        norm["source_strategy"] = sn
+        norm["category"] = f"{sn} | {norm.get('category', norm.get('strategy_category', '扫描机会'))}"
+        norm["strategy_category"] = norm["category"]
+        norm["group_sort_score"] = priority
+        details = norm.get("details")
+        if isinstance(details, dict):
+            details.setdefault("来源策略", sn)
+            details.setdefault("机会类型", norm["category"])
+        signals = list(norm.get("signals", []) or [])
+        if not signals:
+            signals = [norm["category"]]
+        elif sn not in str(signals[0]):
+            signals[0] = f"{sn}: {signals[0]}"
+        norm["signals"] = signals
+        timing_ok, timing_reason = _passes_hard_entry_timing_filter(norm, self.config)
+        norm["_entry_timing_ok"] = timing_ok
+        if not timing_ok:
+            norm["passed"] = False
+            details = norm.get("details")
+            if not isinstance(details, dict):
+                details = {}
+                norm["details"] = details
+            details["硬过滤"] = timing_reason
+            details["状态"] = timing_reason
+        if enrich_scan_result:
+            try: enrich_scan_result(norm)
+            except Exception: pass
+        return norm
+
+    def _build_consensus_results(self, child_results):
+        by_sym: Dict[str, List] = {}
+        for item in child_results:
+            by_sym.setdefault(str(item.get("symbol", "")), []).append(item)
+        return [r for r in (self._build_consensus_result(sym, items) for sym, items in by_sym.items()) if r]
+
+    def _build_consensus_result(self, symbol: str, items: List) -> Optional[Dict[str, Any]]:
+        min_eng = int(self.config.get("min_consensus_engines", 2) or 2)
+        if len(items) < min_eng:
+            return None
+        strategies = {item.get("source_strategy") for item in items}
+        if len(strategies) < min_eng:
+            return None
+        dirs = [str(item.get("direction","WAIT")).upper() for item in items if str(item.get("direction","WAIT")).upper() in {"BUY","SELL"}]
+        if not dirs:
+            return None
+        dc = {d: dirs.count(d) for d in {"BUY","SELL"}}
+        direction = max(dc, key=dc.get)
+        support = int(dc.get(direction, 0))
+        disagree = max(0, len(dirs) - support)
+        if support < min_eng:
+            return None
+
+        base_score = sum(float(item.get("score", 0) or 0) for item in items) / len(items)
+        opp_score  = sum(float(item.get("opportunity_score", item.get("score", 0)) or 0) for item in items) / len(items)
+
+        # v4.0: 市场状态条件权重 — 不同策略在不同市场状态下效率不同
+        if bool(self.config.get("enable_state_conditional_weights", True)):
+            active_state = self._infer_market_state_from_data({}) or "neutral"
+            # 各策略在不同状态下的条件权重（基于逻辑：趋势策略在趋势市更强）
+            STATE_WEIGHTS = {
+                "trend":    {"DRL小时趋势启动": 1.20, "截面多因子": 1.00, "AI因子挖掘": 1.05,
+                             "XGBoost截面排序": 1.05, "AI订单流动量": 1.00},
+                "range":    {"截面多因子": 1.15, "AI因子挖掘": 1.05, "DRL小时趋势启动": 0.75,
+                             "XGBoost截面排序": 1.10, "AI订单流动量": 0.95},
+                "volatile": {"AI因子挖掘": 1.10, "截面多因子": 1.00, "DRL小时趋势启动": 0.80,
+                             "AI订单流动量": 1.15, "XGBoost截面排序": 0.95},
+                "neutral":  {},
+            }
+            ws = STATE_WEIGHTS.get(active_state, {})
+            weighted = sum(
+                float(it.get("score", 0) or 0) * ws.get(it.get("source_strategy", ""), 1.0)
+                for it in items
+            )
+            weight_sum = sum(ws.get(it.get("source_strategy", ""), 1.0) for it in items)
+            if weight_sum > 0:
+                base_score = weighted / weight_sum  # v3 修正：只除一次 weight_sum
+                opp_score = base_score * 0.98
+
+        if support >= 5:
+            rb = float(self.config.get("quintuple_consensus_bonus", 18.0) or 18.0)
+            signal_head = "五引擎同向强共振"; category = "五引擎强共振"; gss = 1400
+        elif support >= 4:
+            rb = float(self.config.get("quadruple_consensus_bonus", 15.5) or 15.5)
+            signal_head = "四引擎同向强共振"; category = "四引擎强共振"; gss = 1370
+        elif support >= 3:
+            rb = float(self.config.get("triple_consensus_bonus", 13.0) or 13.0)
+            signal_head = "三引擎同向强共振"; category = "三引擎强共振"; gss = 1350
+        elif disagree == 0:
+            rb = float(self.config.get("consensus_bonus", 8.5) or 8.5)
+            signal_head = "双引擎同向共振"; category = "双引擎共振"; gss = 1240
+        else:
+            rb = float(self.config.get("consensus_bonus", 8.5) or 8.5) * 0.70
+            signal_head = "多引擎多数共振(含分歧)"; category = "多引擎多数共振"; gss = 1180
+
+        cp = float(self.config.get("direction_conflict_penalty", 8.0) or 8.0) * disagree * 0.55
+        score = min(100.0, max(0.0, base_score + rb - cp))
+        opp_score = min(100.0, max(0.0, opp_score + rb - cp))
+        passed = score >= float(self.config.get("min_score", 83.0) or 83.0)
+
+        src_names = [str(item.get("source_strategy","")) for item in items]
+        lp = _first_number(items, "last_price")
+        v24 = _first_number(items, "volume_24h")
+        pc24 = _first_number(items, "price_change_24h")
+
+        # v2: 汇总时效性信息
+        age_infos = []
+        stale_infos = []
+        # v3.2: 汇总微观结构信息
+        micro_infos = []
+        for item in items:
+            d = item.get("details") if isinstance(item.get("details"), dict) else {}
+            age_s = str(d.get("1H趋势延续根数","")).strip()
+            stale_s = str(d.get("3分钟时效(根)","")).strip()
+            micro_s = str(d.get("3m微观指标", d.get("微观指标", ""))).strip()
+            if age_s: age_infos.append(f"{item.get('source_strategy')}={age_s}")
+            if stale_s: stale_infos.append(f"{item.get('source_strategy')}={stale_s}")
+            if micro_s: micro_infos.append(f"{item.get('source_strategy')}:{micro_s}")
+
+        m3_states = []
+        for item in items:
+            d = item.get("details") if isinstance(item.get("details"), dict) else {}
+            st = str(d.get("3分钟结构","") or "").strip()
+            if st: m3_states.append(f"{item.get('source_strategy')}={st}")
+
+        signals = [
+            f"{signal_head} {score:.1f}",
+            f"同向支持引擎: {support}/{len(items)}",
+            "来源: " + " / ".join(src_names),
+            "子策略评分: " + " / ".join(f"{item.get('source_strategy')}={float(item.get('score',0) or 0):.1f}" for item in items),
+        ]
+        if m3_states: signals.append("3m结构: " + " / ".join(m3_states))
+        if age_infos: signals.append("1H趋势时效: " + " / ".join(age_infos))
+        if micro_infos: signals.append("3m微观: " + " / ".join(micro_infos))  # v3.2
+
+        result = {
+            "symbol": symbol, "passed": passed,
+            "score": round(score, 2), "opportunity_score": round(opp_score, 2),
+            "direction": direction, "signals": signals,
+            "category": category, "strategy_category": category,
+            "source_strategy": "多引擎共振",
+            "group_sort_score": gss,
+            "last_price": lp, "volume_24h": v24, "price_change_24h": pc24,
+            "child_results": items, "consensus_engines": support,
+            "details": {
+                "机会类型": category,
+                "来源策略": " / ".join(src_names),
+                "主方向": direction,
+                "同向支持引擎": f"{support}/{len(items)}",
+                "方向分歧数": str(disagree),
+                "子策略评分": " / ".join(f"{item.get('source_strategy')}={float(item.get('score',0) or 0):.1f}" for item in items),
+                "3分钟结构": " / ".join(m3_states) if m3_states else "-",
+                "1H趋势时效": " / ".join(age_infos) if age_infos else "-",   # v2
+                "3m回调时效": " / ".join(stale_infos) if stale_infos else "-", # v2
+                "3m微观指标": " / ".join(micro_infos) if micro_infos else "-", # v3.2
+                "评估": " | ".join(signals),
+            },
+            "ranking_factors": _merge_ranking_factors(items, score),
+        }
+        timing_ok, timing_reason = _passes_hard_entry_timing_filter(result, self.config)
+        if not timing_ok:
+            result["passed"] = False
+            result["details"]["硬过滤"] = timing_reason
+        if build_opportunity_profile:
+            try: result.update(build_opportunity_profile(score, direction, v24, result["ranking_factors"], signals))
+            except Exception: pass
+        return result if result.get("passed") else None
+
+    # ── 子策略加载（v2: 多路径查找）─────────────────────────────────────────
+    def _build_child_strategies(self):
+        strategies = []
+        search_dirs = self._strategy_search_dirs()
+        for sn, filename, class_name, priority in self.CHILDREN:
+            module_path = self._find_strategy_file(filename, search_dirs)
+            if module_path is None:
+                print(f"[组合] 跳过 {sn}: 在以下路径均未找到 {filename}\n  {[str(d) for d in search_dirs]}")
+                continue
+            spec = importlib.util.spec_from_file_location(f"ai_combo_{class_name}", str(module_path))
+            if spec is None or spec.loader is None:
+                print(f"[组合] 跳过 {sn}: spec 创建失败")
+                continue
+            module = importlib.util.module_from_spec(spec)
+            try:
+                sys.modules[spec.name] = module
+                spec.loader.exec_module(module)
+            except Exception as e:
+                print(f"[组合] 跳过 {sn}: 加载失败 {e}")
+                continue
+            strategy_class = (getattr(module, class_name, None)
+                              or getattr(module, "STRATEGY_CLASS", None))
+            if strategy_class is None:
+                print(f"[组合] 跳过 {sn}: 缺少策略类 {class_name}")
+                continue
+            try:
+                child_cfg = self._child_config(sn)
+                strategies.append((sn, strategy_class(child_cfg), priority))
+                print(f"[组合] 已加载 {sn} ({module_path.name})")
+            except Exception as e:
+                print(f"[组合] 跳过 {sn}: 初始化失败 {e}")
+        return strategies
+
+    def _strategy_search_dirs(self) -> List[Path]:
+        """按优先级返回搜索目录列表。"""
+        dirs = []
+        # 1. 当前文件同级目录
+        try:
+            dirs.append(Path(__file__).resolve().parent)
+        except NameError:
+            dirs.append(Path.cwd())
+        # 2. strategies/ 子目录
+        for base in list(dirs):
+            candidate = base / "strategies"
+            if candidate.is_dir():
+                dirs.append(candidate)
+        # 3. 当前工作目录
+        cwd = Path.cwd()
+        if cwd not in dirs:
+            dirs.append(cwd)
+        if (cwd / "strategies").is_dir():
+            dirs.append(cwd / "strategies")
+        return dirs
+
+    def _find_strategy_file(self, filename: str, search_dirs: List[Path]) -> Optional[Path]:
+        """在所有搜索目录中找到第一个匹配的文件。"""
+        for d in search_dirs:
+            p = d / filename
+            if p.exists():
+                return p
+        return None
+
+    def _child_config(self, strategy_name: str) -> Dict[str, Any]:
+        cfg = dict(self.config)
+        # 每个子策略使用其自身的默认参数，而不是组合器的默认值
+        # 避免 min_score=83、min_volume_24h=8M 等组合器参数错误地覆盖子策略
+        CHILD_DEFAULTS = {
+            "截面多因子": {"min_score": 72, "min_volume_24h": 8_000_000},
+            "AI因子挖掘": {"min_score": 72, "min_volume_24h": 5_000_000, "min_abs_edge": 0.24,
+                          "risk_penalty_strength": 0.75, "use_dynamic_ic_weights": False, "ic_weight_blend": 0.0,
+                          "enable_mfin_interactions": False, "enable_llm_factors": False, "enable_on_chain": True},
+            "DRL小时趋势启动": {"min_score": 74, "min_volume_24h": 8_000_000},
+            "XGBoost截面排序": {"min_score": 72, "min_volume_24h": 8_000_000},
+            "AI订单流动量": {"min_score": 72, "min_volume_24h": 5_000_000},
+        }
+        child_default = CHILD_DEFAULTS.get(strategy_name, {})
+        for k, v in child_default.items():
+            if k not in cfg:
+                cfg[k] = v
+            elif cfg[k] == _DEFAULT_CONFIG.get(k):  # 如果值等于组合器默认值，则替换为子策略默认值
+                cfg[k] = v
+
+        if strategy_name == "截面多因子" and bool(self.config.get("accelerate_cross_section_child", True)):
+            cfg["use_dynamic_ic_weights"] = False
+            cfg["ic_weight_blend"] = 0.0
+            if bool(self.config.get("accel_disable_m3", False)):
+                cfg["require_m3_pullback_confirmation"] = False
+        # 时效性 + 微观结构参数（全策略通用）
+        for key in ("max_h1_trend_age", "h1_trend_age_penalty",
+                    "max_m3_staleness_bars", "m3_freshness_penalty", "bonus_freshness_score",
+                    "require_m3_freshness", "m3_min_impulse_pct", "vol_continuation_min_ratio",
+                    "enable_atr_squeeze_check", "atr_squeeze_ratio",
+                    "enable_volume_delta_check", "volume_delta_min_ratio",
+                    "enable_vwap_alignment_check",
+                    "require_m3_pullback", "m3_pullback_min_pct", "m3_pullback_max_pct",
+                    "m3_stabilization_bars", "coint_lookback", "coint_significance"):
+            cfg.setdefault(key, _DEFAULT_CONFIG.get(key, 12))
+        # XGBoost 专属参数透传
+        if strategy_name == "XGBoost截面排序":
+            for key in ("xgb_max_depth","xgb_n_estimators","xgb_learning_rate",
+                        "xgb_subsample","xgb_colsample_bytree","xgb_reg_alpha",
+                        "xgb_reg_lambda","xgb_min_child_weight","xgb_retrain_hours",
+                        "xgb_min_samples","xgb_fallback_weight","xgb_trained_weight",
+                        "xgb_label_delay_bars"):
+                cfg.setdefault(key, _DEFAULT_CONFIG.get(key))
+        # 订单流专属参数透传
+        if strategy_name == "AI订单流动量":
+            for key in ("enable_orderflow","orderflow_weight","enable_momentum_interact",
+                        "interact_weight","enable_btc_spread","btc_spread_weight",
+                        "btc_spread_z_entry","enable_micro_vwap","enable_volume_delta",
+                        "enable_atr_squeeze"):
+                cfg.setdefault(key, _DEFAULT_CONFIG.get(key))
+        return cfg
+
+    # ── 市场状态推断 ──────────────────────────────────────────────────────────
+    def _state_adjustment(self, sn: str, state: str) -> Tuple[float, float]:
+        table = {
+            "trend":    {"DRL小时趋势启动": (2.8,1.03), "AI因子挖掘": (1.5,1.01), "截面多因子": (0.8,1.00),
+                         "XGBoost截面排序": (1.2,1.01), "AI订单流动量": (1.0,1.00)},
+            "range":    {"截面多因子": (2.1,1.02),       "AI因子挖掘": (1.2,1.01), "DRL小时趋势启动": (-1.8,0.98),
+                         "XGBoost截面排序": (1.5,1.01), "AI订单流动量": (0.5,1.00)},
+            "volatile": {"AI因子挖掘": (0.9,1.00),       "截面多因子": (0.6,1.00), "DRL小时趋势启动": (-1.2,0.97),
+                         "AI订单流动量": (1.2,1.01), "XGBoost截面排序": (0.7,1.00)},
+            "neutral":  {"DRL小时趋势启动": (0.4,1.00),  "AI因子挖掘": (0.4,1.00), "截面多因子": (0.4,1.00),
+                         "XGBoost截面排序": (0.4,1.00), "AI订单流动量": (0.4,1.00)},
+        }
+        return table.get(str(state).lower(), {}).get(sn, (0.0, 1.0))
+
+    def _normalize_state_mode(self, state_mode) -> str:
+        mode = str(state_mode or "auto").strip().lower()
+        return mode if mode in {"auto","trend","range","volatile","neutral"} else "auto"
+
+    def _infer_market_state_from_data(self, data) -> str:
+        if isinstance(data, dict):
+            direct = str(data.get("market_state", data.get("state_mode",""))).strip().lower()
+            if direct in {"trend","range","volatile","neutral"}:
+                return direct
+        closes = self._extract_closes_from_backtest_data(data)
+        if len(closes) < 40:
+            return "neutral"
+        series = pd.Series(closes, dtype=float).replace([np.inf,-np.inf], np.nan).dropna()
+        if len(series) < 40:
+            return "neutral"
+        fast = float(series.ewm(span=12, adjust=False).mean().iloc[-1])
+        slow = float(series.ewm(span=34, adjust=False).mean().iloc[-1])
+        last = max(abs(float(series.iloc[-1])), 1e-9)
+        gap_pct = abs(fast - slow) / last * 100.0
+        lb = min(24, len(series) - 1)
+        dir_move = abs((float(series.iloc[-1]) / max(float(series.iloc[-lb-1]),1e-9) - 1.0)*100.0) if lb > 0 else 0.0
+        rv = float(np.log(series).diff().dropna().tail(min(24,len(series)-1)).std() * np.sqrt(24) * 100.0)
+        if rv >= 6.2: return "volatile"
+        if gap_pct >= 1.25 and dir_move >= 1.6: return "trend"
+        if gap_pct <= 0.85 and dir_move <= 1.2 and rv <= 5.4: return "range"
+        return "neutral"
+
+    def _extract_closes_from_backtest_data(self, data) -> List[float]:
+        rows: List = []
+        if isinstance(data, dict):
+            km = data.get("klines_map") if isinstance(data.get("klines_map"), dict) else {}
+            for key in ("1H","1h","60m","60M","15m","15M"):
+                if key in km and isinstance(km.get(key), list) and km.get(key):
+                    rows = list(km.get(key) or []); break
+            if not rows and isinstance(data.get("klines"), list): rows = list(data.get("klines") or [])
+            if not rows and isinstance(data.get("bars"), list): rows = list(data.get("bars") or [])
+        elif isinstance(data, (list, tuple)): rows = list(data)
+        closes = []
+        for row in rows:
+            val = row.get("c", row.get("close")) if isinstance(row, dict) else (row[4] if isinstance(row,(list,tuple)) and len(row)>=5 else row)
+            try:
+                c = float(val)
+                if np.isfinite(c): closes.append(c)
+            except (TypeError, ValueError): pass
+        return closes
+
+    # ── 回测对比 ──────────────────────────────────────────────────────────────
+    def run_state_backtest_compare(self, dataset, *a, **kw) -> Dict[str, Any]:
+        if isinstance(dataset, dict) and isinstance(dataset.get("samples"), list):
+            samples = list(dataset.get("samples") or [])
+        elif isinstance(dataset, (list,tuple)): samples = list(dataset)
+        else: samples = [dataset]
+        samples = [s for s in samples if s is not None]
+        modes = ["auto","trend","range","volatile"]
+        compare = {m: self._simulate_state_mode(samples, m, *a, **kw) for m in modes}
+        best_mode = max(compare, key=lambda m: (
+            float(compare[m].get("total_return_pct") or -1e9) if compare[m].get("total_return_pct") is not None
+            else float(compare[m].get("avg_signal_score", 0) or 0)
+        ))
+        return {"type":"state_mode_backtest_compare","sample_count":len(samples),"compare":compare,"best_mode":best_mode}
+
+    def _simulate_state_mode(self, samples, mode, *a, **kw):
+        trades=wins=losses=0; score_sum=0.0; consensus_hits=0; rets=[]
+        for sample in samples:
+            sig = self.generate_signal(sample, *a, state_mode=mode, **kw)
+            if not sig: continue
+            if str(sig.get("action","")).upper() not in {"BUY","SHORT"}: continue
+            trades += 1
+            score_sum += float(sig.get("score",0) or 0)
+            if int(sig.get("consensus_engines",0) or 0) >= int(self.config.get("min_consensus_engines",2) or 2):
+                consensus_hits += 1
+            ret = self._extract_realized_return(sample, sig)
+            if ret is None: continue
+            rets.append(ret)
+            if ret > 0: wins += 1
+            elif ret < 0: losses += 1
+        avg = score_sum/trades if trades else 0.0
+        wr = (wins/(wins+losses)*100) if (wins+losses) else None
+        if rets:
+            eq=peak=1.0; mdd=0.0
+            for r in rets:
+                eq*=(1+r); peak=max(peak,eq)
+                mdd=max(mdd,(peak-eq)/peak if peak>0 else 0)
+            tr=(eq-1)*100
+        else: tr=mdd=None
+        return {"mode":mode,"trades":trades,"wins":wins,"losses":losses,
+                "win_rate_pct":round(float(wr),2) if wr is not None else None,
+                "avg_signal_score":round(float(avg),2),
+                "consensus_hits":consensus_hits,
+                "consensus_ratio_pct":round(consensus_hits/trades*100,2) if trades else 0.0,
+                "total_return_pct":round(float(tr),2) if tr is not None else None,
+                "max_drawdown_pct":round(float(mdd)*100,2) if mdd is not None else None}
+
+    def _extract_realized_return(self, sample, signal) -> Optional[float]:
+        if not isinstance(sample, dict): return None
+        candidates = [sample.get(k) for k in ("future_return","future_return_1h","next_return","label_return","target_return","ret_1h")]
+        labels = sample.get("labels") if isinstance(sample.get("labels"), dict) else {}
+        candidates += [labels.get(k) for k in ("future_return","future_return_1h","next_return","ret_1h")]
+        ret = None
+        for v in candidates:
+            try:
+                n = float(v)
+                if np.isfinite(n): ret = n; break
+            except (TypeError, ValueError): pass
+        if ret is None: return None
+        if abs(ret) > 3.0: ret /= 100.0
+        if str(signal.get("action","")).upper() in {"SHORT","SELL"}: ret = -ret
+        return max(-0.95, min(5.0, ret))
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 工具函数
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _result_sort_key(item: Dict[str, Any]) -> Tuple[float, float, float, float]:
+    return (
+        float(item.get("group_sort_score", 0) or 0),
+        float(item.get("opportunity_score", item.get("score", 0)) or 0),
+        float(item.get("score", 0) or 0),
+        float(item.get("volume_24h", 0) or 0),
+    )
+
+def _dedupe_results(results: List[Dict[str, Any]], dedupe_by_symbol: bool = True) -> List[Dict[str, Any]]:
+    best: Dict = {}
+    for item in results:
+        sym = str(item.get("symbol",""))
+        src = str(item.get("source_strategy",""))
+        key = sym if dedupe_by_symbol else (sym, src)
+        ex = best.get(key)
+        if ex is None or _result_sort_key(item) > _result_sort_key(ex):
+            best[key] = item
+    return list(best.values())
+
+def _safe_number(value, default: float = 0.0) -> float:
+    try:
+        n = float(value)
+    except (TypeError, ValueError):
+        return default
+    return n if np.isfinite(n) else default
+
+def _extract_first_int(value) -> Optional[int]:
+    if value is None:
+        return None
+    if isinstance(value, (int, np.integer)):
+        return int(value)
+    text = str(value).strip()
+    if not text:
+        return None
+    m = re.search(r"-?\d+", text)
+    return int(m.group(0)) if m else None
+
+def _truthy_cn(value) -> bool:
+    text = str(value or "").strip().lower()
+    return text in {"1", "true", "yes", "y", "是", "通过", "已确认"}
+
+def _passes_hard_entry_timing_filter(result: Dict[str, Any], config: Dict[str, Any]) -> Tuple[bool, str]:
+    if not bool(config.get("hard_entry_timing_filter", True)):
+        return True, ""
+
+    direction = str(result.get("direction", "WAIT")).upper()
+    if direction not in {"BUY", "SELL"}:
+        return True, ""
+
+    details = result.get("details") if isinstance(result.get("details"), dict) else {}
+    max_h1_age = max(1, int(_safe_number(config.get("hard_max_h1_trend_age", 4), 4)))
+    h1_age = _extract_first_int(details.get("1H趋势延续根数"))
+    if h1_age is None:
+        h1_age = _extract_first_int(details.get("1H趋势时效"))
+    if h1_age is None:
+        return False, "硬过滤: 缺少1H趋势时效信息，无法确认是否属于早启动区"
+    if h1_age > max_h1_age:
+        return False, f"硬过滤: 1H趋势已延续{h1_age}根，超过允许的{max_h1_age}根，避免追在小时线过度延伸段"
+
+    pullback_confirmed = _truthy_cn(details.get("3分钟回调确认"))
+    m3_state = str(details.get("3分钟结构", "") or "").strip()
+    m3_reason = str(details.get("3分钟回调结论", "") or "").strip()
+    if not pullback_confirmed and m3_state != "回调完成":
+        return False, "硬过滤: 3m 未完成回调企稳确认，只保留回调完成后的续势启动位"
+    if "过期" in m3_state or "过旧" in m3_reason or "超时" in m3_reason:
+        return False, "硬过滤: 3m 回调企稳信号已过期，避免建仓后立刻遭遇1H回调"
+
+    return True, ""
+
+def _recent_kline_move_pct(rows, lookback: int = 6) -> float:
+    if not rows or not isinstance(rows, (list,tuple)) or len(rows) < 2:
+        return 0.0
+    try:
+        end = float(rows[-1][4]); start = float(rows[max(0,len(rows)-lookback-1)][4])
+    except (TypeError, ValueError, IndexError):
+        return 0.0
+    if not np.isfinite(end) or not np.isfinite(start) or start <= 0:
+        return 0.0
+    return (end/start - 1.0)*100.0
+
+def _first_number(items: List[Dict], key: str) -> float:
+    for item in items:
+        try:
+            v = float(item.get(key, 0) or 0)
+            if v: return v
+        except (TypeError, ValueError): pass
+    return 0.0
+
+def _merge_ranking_factors(items: List[Dict], fallback: float) -> Dict[str, float]:
+    keys = ["trend","trigger","volume","location","freshness","risk"]
+    merged = {}
+    for key in keys:
+        vals = []
+        for item in items:
+            f = item.get("ranking_factors") or {}
+            try: vals.append(float(f.get(key, fallback)))
+            except (TypeError, ValueError): pass
+        merged[key] = sum(vals)/len(vals) if vals else fallback
+    return merged
+
+
+STRATEGY_NAME = "AI截面五引擎组合扫描器"
+STRATEGY_TYPE = "scan"
+STRATEGY_CLASS = AICrossSectionDualFactorComboScanner
+BACKTEST_CLASS = AICrossSectionDualFactorComboScanner
