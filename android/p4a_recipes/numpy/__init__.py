@@ -2,7 +2,7 @@ from pythonforandroid.recipe import CompiledComponentsPythonRecipe
 from pythonforandroid.logger import shprint, info
 from pythonforandroid.util import current_directory
 from multiprocessing import cpu_count
-from os.path import join
+from os.path import join, dirname
 import glob
 import sh
 import shutil
@@ -98,7 +98,7 @@ class NumpyRecipe(CompiledComponentsPythonRecipe):
         with current_directory(self.get_build_dir(arch.arch)):
             hostpython = sh.Command(self.hostpython_location)
             # Ensure pip is available (use minimal env to avoid permission issues)
-            host_bin = os.path.dirname(self.hostpython_location)
+            host_bin = dirname(self.hostpython_location)
             shprint(hostpython, '-m', 'ensurepip', '-U',
                     _env={"HOME": "/tmp", "PATH": host_bin})
             # Ensure setuptools is installed (provides _distutils for Python 3.12+)
