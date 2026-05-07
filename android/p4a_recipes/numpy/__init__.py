@@ -72,6 +72,10 @@ class NumpyRecipe(CompiledComponentsPythonRecipe):
         env = super().get_recipe_env(arch, with_flags_in_cc)
         env["_PYTHON_HOST_PLATFORM"] = arch.command_prefix
         env["NPY_DISABLE_SVML"] = "1"
+        # Fix: remove -Werror which breaks on cross-compilation
+        for key in ['CFLAGS', 'CXXFLAGS', 'CPPFLAGS']:
+            if key in env:
+                env[key] = env[key].replace('-Werror', '-Wno-error')
         return env
 
     def _build_compiled_components(self, arch):
