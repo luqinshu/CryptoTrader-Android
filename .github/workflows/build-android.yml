@@ -73,13 +73,40 @@ jobs:
         echo "=== SEARCHING FOR ERRORS IN .buildozer ==="
         grep -ri "error\|exception\|traceback\|FAILED\|fatal" .buildozer/ 2>/dev/null | tail -50 || echo "(no .buildozer dir)"
 
-    - name: Upload buildozer output
+    - name: Publish build output to public release
       if: always()
-      uses: actions/upload-artifact@v4
-      with:
-        name: buildozer-output
-        path: android/buildozer_output.txt
-        retention-days: 7
+      working-directory: android
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        TAG="build-log-run-${{ github.run_number }}"
+        git tag -f "$TAG"
+        git push -f origin "$TAG" 2>/dev/null || true
+        
+        # Delete existing release if any, then create new
+        curl -s -X DELETE \
+          -H "Authorization: token $GH_TOKEN" \
+          "https://api.github.com/repos/${{ github.repository }}/releases/tags/$TAG" 2>/dev/null || true
+        
+        # Create release
+        RELEASE_ID=$(curl -s -X POST \
+          -H "Authorization: token $GH_TOKEN" \
+          -H "Content-Type: application/json" \
+          "https://api.github.com/repos/${{ github.repository }}/releases" \
+          -d "{\"tag_name\":\"$TAG\",\"name\":\"Build Log #${{ github.run_number }}\",\"body\":\"Commit: ${{ github.sha }}\nStatus: ${{ job.status }}\"}" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("id",""))')
+        
+        # Upload build output as release asset
+        if [ -n "$RELEASE_ID" ] && [ -f buildozer_output.txt ]; then
+          curl -s -X POST \
+            -H "Authorization: token $GH_TOKEN" \
+            -H "Content-Type: text/plain" \
+            --data-binary @buildozer_output.txt \
+            "https://uploads.github.com/repos/${{ github.repository }}/releases/$RELEASE_ID/assets?name=buildozer_output.txt"
+          echo ""
+          echo "Build log available at: https://github.com/${{ github.repository }}/releases/tag/$TAG"
+        else
+          echo "Failed to create release or output file missing"
+        fi
 
     - name: Upload build logs
       if: always()
