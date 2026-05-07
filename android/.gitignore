@@ -22,4 +22,4 @@ Thumbs.db
 
 # Config with secrets
 scanner_config.json
-android/fonts/PingFang.ttc
+fonts/PingFang.ttc
