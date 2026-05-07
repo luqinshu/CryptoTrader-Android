@@ -97,12 +97,10 @@ class NumpyRecipe(CompiledComponentsPythonRecipe):
         env = self.get_recipe_env(arch)
         with current_directory(self.get_build_dir(arch.arch)):
             hostpython = sh.Command(self.hostpython_location)
-            # Ensure pip is available (use minimal env to avoid permission issues)
+            # Ensure pip+setuptools installed (use minimal env)
             host_bin = dirname(self.hostpython_location)
             shprint(hostpython, '-m', 'ensurepip', '-U',
                     _env={"HOME": "/tmp", "PATH": host_bin})
-            # Ensure setuptools is installed (provides _distutils for Python 3.12+)
-            shprint(hostpython, '-m', 'pip', 'install', 'setuptools', '-q', _env=env)
             shprint(hostpython, 'setup.py', self.build_cmd, '-v', _env=env, *self.setup_extra_args)
             build_dir = glob.glob('build/lib.*')[0]
             shprint(sh.find, build_dir, '-name', '"*.o"', '-exec', env['STRIP'], '{}', ';', _env=env)
