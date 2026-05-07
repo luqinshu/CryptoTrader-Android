@@ -95,15 +95,14 @@ class NumpyRecipe(CompiledComponentsPythonRecipe):
         info('Building compiled components in {}'.format(self.name))
         self._fix_distutils_import(arch)
         env = self.get_recipe_env(arch)
+        # Use /tmp as HOME so pip installs go to user site-packages
+        env['HOME'] = '/tmp'
         with current_directory(self.get_build_dir(arch.arch)):
             hostpython = sh.Command(self.hostpython_location)
-            # Ensure pip+setuptools installed (use minimal env)
-            host_bin = dirname(self.hostpython_location)
-            shprint(hostpython, '-m', 'ensurepip', '-U',
-                    _env={"HOME": "/tmp", "PATH": host_bin})
+            # Ensure pip+setuptools installed
+            shprint(hostpython, '-m', 'ensurepip', '-U', _env=env)
             # Install Cython (numpy needs it for setup.py build_ext)
-            shprint(hostpython, '-m', 'pip', 'install', 'cython', '-q',
-                    _env={"HOME": "/tmp", "PATH": host_bin})
+            shprint(hostpython, '-m', 'pip', 'install', 'cython', '-q', _env=env)
             shprint(hostpython, 'setup.py', self.build_cmd, '-v', _env=env, *self.setup_extra_args)
             build_dir = glob.glob('build/lib.*')[0]
             shprint(sh.find, build_dir, '-name', '"*.o"', '-exec', env['STRIP'], '{}', ';', _env=env)
