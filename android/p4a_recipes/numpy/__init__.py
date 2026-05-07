@@ -68,16 +68,18 @@ class NumpyRecipe(CompiledComponentsPythonRecipe):
         # Copy Cython from CI Python to hostpython3's site-packages
         import sysconfig as _sc
         _ci_sp = _sc.get_path('purelib')
-        # hostpython3 site-packages: .../root/usr/local/lib/python3.11/site-packages/
-        _prefix = dirname(dirname(dirname(self.hostpython_location)))
-        _ver = 'python{}.{}'.format(*sys.version_info[:2])
-        _hp_sp = join(_prefix, 'lib', _ver, 'site-packages')
         _cython_src = join(_ci_sp, 'Cython')
         if exists(_cython_src):
+            # Get hostpython3 site-packages by asking hostpython3
+            import subprocess as _sp
+            _hp_sp = _sp.check_output(
+                [self.hostpython_location, '-c',
+                 'import site; print(site.getsitepackages()[0])'],
+                text=True).strip()
             _cython_dst = join(_hp_sp, 'Cython')
             if not exists(_cython_dst):
                 shutil.copytree(_cython_src, _cython_dst)
-                info('Copied Cython to hostpython3 site-packages: {}'.format(_cython_dst))
+                info('Copied Cython to hostpython3: {}'.format(_cython_dst))
         with current_directory(self.get_build_dir(arch.arch)):
             hostpython = sh.Command(self.hostpython_location)
             shprint(hostpython, 'setup.py', self.build_cmd, '-v', _env=env, *self.setup_extra_args)
