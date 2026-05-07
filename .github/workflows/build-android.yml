@@ -40,7 +40,11 @@ jobs:
 
     - name: Build APK
       working-directory: android
-      run: buildozer -v android debug
+      run: |
+        buildozer -v android debug 2>&1 | tee buildozer_output.txt
+        EXIT_CODE=${PIPESTATUS[0]}
+        echo "BUILDOZER EXIT CODE: ${EXIT_CODE}"
+        exit ${EXIT_CODE}
       env:
         BUILDOZER_ALLOW_ROOT: 1
 
@@ -56,14 +60,20 @@ jobs:
       if: failure()
       working-directory: android
       run: |
-        echo "=== LAST 200 LINES OF .buildozer/android/platform/build/build.log ==="
-        tail -200 .buildozer/android/platform/build/build.log 2>/dev/null || echo "(build log not found, checking other logs...)"
-        echo "=== LAST 100 LINES OF .buildozer/log.txt ==="
-        tail -100 .buildozer/log.txt 2>/dev/null || echo "no log.txt"
-        echo "=== SEARCHING FOR ERRORS ==="
-        grep -ri "error" .buildozer/ 2>/dev/null | tail -50 || echo "no error messages found"
-        echo "=== SEARCHING FOR FAILED ==="
-        grep -ri "FAILED\|failed\|fatal" .buildozer/ 2>/dev/null | tail -30 || echo "no failure messages found"
+        echo "=== LAST 50 LINES OF buildozer_output.txt ==="
+        tail -50 buildozer_output.txt 2>/dev/null || echo "(no buildozer_output.txt)"
+        echo "=== SEARCHING FOR ERRORS IN OUTPUT ==="
+        grep -i "error\|exception\|traceback\|FAILED\|fatal" buildozer_output.txt 2>/dev/null | tail -30 || echo "(no output file)"
+        echo "=== SEARCHING FOR ERRORS IN .buildozer ==="
+        grep -ri "error\|exception\|traceback\|FAILED\|fatal" .buildozer/ 2>/dev/null | tail -50 || echo "(no .buildozer dir)"
+
+    - name: Upload buildozer output
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: buildozer-output
+        path: android/buildozer_output.txt
+        retention-days: 7
 
     - name: Upload build logs
       if: always()
