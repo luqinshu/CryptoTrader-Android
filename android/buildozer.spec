@@ -32,6 +32,11 @@ android.accept_sdk_license = True
 p4a.branch = develop
 p4a.local_recipes = ./p4a_recipes
 
+# Release signing (uncomment and set env vars to build release)
+# android.release_artifact = apk
+# p4a.release = %(source.dir)s/keystore/cryptoscanner.keystore
+# p4a.release_keyalias = cryptoscanner
+
 [buildozer]
 log_level = 2
 warn_on_root = 1

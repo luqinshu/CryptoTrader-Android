@@ -23,3 +23,6 @@ Thumbs.db
 # Config with secrets
 scanner_config.json
 fonts/PingFang.ttc
+
+# Release signing
+keystore/
