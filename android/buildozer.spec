@@ -27,6 +27,7 @@ android.screen = portrait
 android.use_fullscreen = False
 android.display_cutout = True
 android.allow_backup = False
+android.accept_sdk_license = True
 
 p4a.branch = develop
 
