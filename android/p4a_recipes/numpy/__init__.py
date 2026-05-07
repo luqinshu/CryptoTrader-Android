@@ -10,8 +10,8 @@ import shutil
 
 class NumpyRecipe(CompiledComponentsPythonRecipe):
 
-    version = '1.26.4'
-    url = 'https://files.pythonhosted.org/packages/source/n/numpy/numpy-{version}.tar.gz'
+    version = '1.22.3'
+    url = 'https://pypi.python.org/packages/source/n/numpy/numpy-{version}.zip'
     site_packages_name = 'numpy'
     depends = ['setuptools']
     install_in_hostpython = True
@@ -24,66 +24,35 @@ class NumpyRecipe(CompiledComponentsPythonRecipe):
     ]
 
     def _fix_distutils_import(self, arch):
-        """Fix distutils for Python 3.12+ by adding compatibility shim.
-        
-        Strategy: insert 'import setuptools._distutils as distutils' as the
-        very first line of every .py file that references distutils. This makes
-        all existing 'distutils.XXX' and 'from distutils.XXX import YYY' work.
-        Only special case: msvccompiler (not present in setuptools._distutils).
-        """
+        """Fix numpy distutils imports for cross-compilation."""
         import os
         build_dir = self.get_build_dir(arch.arch)
 
-        for root, dirs, files in os.walk(build_dir):
-            if '/__pycache__/' in root or '/.git/' in root:
-                continue
-            for fname in files:
-                if not fname.endswith('.py'):
-                    continue
-                fpath = os.path.join(root, fname)
-                try:
-                    with open(fpath) as f:
-                        content = f.read()
-                except Exception:
-                    continue
+        # Fix msvccompiler import (may not exist in all Python versions)
+        target = os.path.join(build_dir, 'numpy', 'distutils', 'mingw32ccompiler.py')
+        if os.path.exists(target):
+            with open(target) as f:
+                content = f.read()
+            old = 'from distutils.msvccompiler import get_build_version as get_build_msvc_version'
+            if old in content:
+                new = 'try:\n    from distutils.msvccompiler import get_build_version as get_build_msvc_version\nexcept ImportError:\n    get_build_msvc_version = lambda: 14.0'
+                content = content.replace(old, new)
+                with open(target, 'w') as f:
+                    f.write(content)
+                info('Fixed msvccompiler import in numpy')
 
-                if 'distutils' not in content:
-                    continue
-
-                modified = False
-
-                # Fix 1: msvccompiler (NOT in setuptools._distutils)
-                if 'from distutils.msvccompiler import' in content:
-                    content = content.replace(
-                        'from distutils.msvccompiler import get_build_version as get_build_msvc_version',
-                        'try:\n    from distutils.msvccompiler import get_build_version as get_build_msvc_version\nexcept ImportError:\n    get_build_msvc_version = lambda: 14.0'
-                    )
-                    modified = True
-
-                # Fix 2: Insert compat shim at top of file (after shebang/encoding)
-                if 'import setuptools._distutils as distutils' not in content:
-                    lines = content.split('\n')
-                    # Find the right insertion point: after docstring if any
-                    insert_idx = 0
-                    # Skip shebang and encoding lines
-                    while insert_idx < len(lines) and (
-                        lines[insert_idx].startswith('#!') or
-                        lines[insert_idx].startswith('# -*-') or
-                        lines[insert_idx].startswith('# vim:') or
-                        lines[insert_idx].strip() == ''
-                    ):
-                        insert_idx += 1
-                    
-                    # Insert the compatibility shim
-                    shim_line = 'import setuptools._distutils as distutils'
-                    lines.insert(insert_idx, shim_line)
-                    content = '\n'.join(lines)
-                    modified = True
-
-                if modified:
-                    with open(fpath, 'w') as f:
-                        f.write(content)
-                    info('Fixed distutils in {}'.format(os.path.relpath(fpath, build_dir)))
+        # Fix LooseVersion import in cythonize.py
+        target = os.path.join(build_dir, 'tools', 'cythonize.py')
+        if os.path.exists(target):
+            with open(target) as f:
+                content = f.read()
+            old = 'from distutils.version import LooseVersion'
+            if old in content:
+                new = 'from setuptools._distutils.version import LooseVersion'
+                content = content.replace(old, new)
+                with open(target, 'w') as f:
+                    f.write(content)
+                info('Fixed LooseVersion import in cythonize.py')
 
     def get_recipe_env(self, arch=None, with_flags_in_cc=True):
         env = super().get_recipe_env(arch, with_flags_in_cc)
@@ -95,14 +64,8 @@ class NumpyRecipe(CompiledComponentsPythonRecipe):
         info('Building compiled components in {}'.format(self.name))
         self._fix_distutils_import(arch)
         env = self.get_recipe_env(arch)
-        # Use /tmp as HOME so pip installs go to user site-packages
-        env['HOME'] = '/tmp'
         with current_directory(self.get_build_dir(arch.arch)):
             hostpython = sh.Command(self.hostpython_location)
-            # Ensure pip+setuptools installed
-            shprint(hostpython, '-m', 'ensurepip', '--default-pip', _env=env)
-            # Install Cython (numpy needs it for setup.py build_ext)
-            shprint(hostpython, '-m', 'pip', 'install', 'cython', '-q', _env=env)
             shprint(hostpython, 'setup.py', self.build_cmd, '-v', _env=env, *self.setup_extra_args)
             build_dir = glob.glob('build/lib.*')[0]
             shprint(sh.find, build_dir, '-name', '"*.o"', '-exec', env['STRIP'], '{}', ';', _env=env)
