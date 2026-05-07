@@ -13,7 +13,7 @@ class NumpyRecipe(CompiledComponentsPythonRecipe):
     version = '1.22.3'
     url = 'https://pypi.python.org/packages/source/n/numpy/numpy-{version}.zip'
     site_packages_name = 'numpy'
-    depends = ['setuptools', 'cython']
+    depends = ['setuptools']
     install_in_hostpython = True
     call_hostpython_via_targetpython = False
 
