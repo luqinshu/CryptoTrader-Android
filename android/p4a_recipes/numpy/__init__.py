@@ -64,6 +64,11 @@ class NumpyRecipe(CompiledComponentsPythonRecipe):
         info('Building compiled components in {}'.format(self.name))
         self._fix_distutils_import(arch)
         env = self.get_recipe_env(arch)
+        # Add CI Python's site-packages to PYTHONPATH so hostpython3 can find Cython
+        import sysconfig as _sc
+        _ci_sp = _sc.get_path('purelib')
+        if _ci_sp not in env.get('PYTHONPATH', ''):
+            env['PYTHONPATH'] = _ci_sp + ':' + env.get('PYTHONPATH', '')
         with current_directory(self.get_build_dir(arch.arch)):
             hostpython = sh.Command(self.hostpython_location)
             shprint(hostpython, 'setup.py', self.build_cmd, '-v', _env=env, *self.setup_extra_args)
