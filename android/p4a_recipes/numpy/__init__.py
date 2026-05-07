@@ -6,6 +6,7 @@ from os.path import join, dirname, exists
 import glob
 import sh
 import shutil
+import sys
 
 
 class NumpyRecipe(CompiledComponentsPythonRecipe):
