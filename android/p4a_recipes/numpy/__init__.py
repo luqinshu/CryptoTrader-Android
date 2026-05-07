@@ -2,11 +2,10 @@ from pythonforandroid.recipe import CompiledComponentsPythonRecipe
 from pythonforandroid.logger import shprint, info
 from pythonforandroid.util import current_directory
 from multiprocessing import cpu_count
-from os.path import join, dirname, exists
+from os.path import join, dirname
 import glob
 import sh
 import shutil
-import sys
 
 
 class NumpyRecipe(CompiledComponentsPythonRecipe):
@@ -29,7 +28,7 @@ class NumpyRecipe(CompiledComponentsPythonRecipe):
         import os
         build_dir = self.get_build_dir(arch.arch)
 
-        # Fix msvccompiler import (may not exist in all Python versions)
+        # Fix msvccompiler import
         target = os.path.join(build_dir, 'numpy', 'distutils', 'mingw32ccompiler.py')
         if os.path.exists(target):
             with open(target) as f:
@@ -55,6 +54,20 @@ class NumpyRecipe(CompiledComponentsPythonRecipe):
                     f.write(content)
                 info('Fixed LooseVersion import in cythonize.py')
 
+        # Skip Cython step by modifying setup.py to make generate_cython a no-op
+        target = os.path.join(build_dir, 'setup.py')
+        if os.path.exists(target):
+            with open(target) as f:
+                content = f.read()
+            old = 'def generate_cython():'
+            if old in content and 'return  # patched' not in content:
+                # Make generate_cython a no-op
+                new = 'def generate_cython():\n    return  # patched: skip Cython'
+                content = content.replace(old, new)
+                with open(target, 'w') as f:
+                    f.write(content)
+                info('Patched setup.py to skip Cython step')
+
     def get_recipe_env(self, arch=None, with_flags_in_cc=True):
         env = super().get_recipe_env(arch, with_flags_in_cc)
         env["_PYTHON_HOST_PLATFORM"] = arch.command_prefix
@@ -65,21 +78,6 @@ class NumpyRecipe(CompiledComponentsPythonRecipe):
         info('Building compiled components in {}'.format(self.name))
         self._fix_distutils_import(arch)
         env = self.get_recipe_env(arch)
-        # Copy Cython from CI Python to hostpython3's site-packages
-        import sysconfig as _sc
-        _ci_sp = _sc.get_path('purelib')
-        _cython_src = join(_ci_sp, 'Cython')
-        if exists(_cython_src):
-            # Get hostpython3 site-packages by asking hostpython3
-            import subprocess as _sp
-            _hp_sp = _sp.check_output(
-                [self.hostpython_location, '-c',
-                 'import site; print(site.getsitepackages()[0])'],
-                text=True).strip()
-            _cython_dst = join(_hp_sp, 'Cython')
-            if not exists(_cython_dst):
-                shutil.copytree(_cython_src, _cython_dst)
-                info('Copied Cython to hostpython3: {}'.format(_cython_dst))
         with current_directory(self.get_build_dir(arch.arch)):
             hostpython = sh.Command(self.hostpython_location)
             shprint(hostpython, 'setup.py', self.build_cmd, '-v', _env=env, *self.setup_extra_args)
