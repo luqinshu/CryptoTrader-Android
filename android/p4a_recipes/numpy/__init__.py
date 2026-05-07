@@ -95,6 +95,8 @@ class NumpyRecipe(CompiledComponentsPythonRecipe):
         info('Building compiled components in {}'.format(self.name))
         self._fix_distutils_import(arch)
         env = self.get_recipe_env(arch)
+        # Avoid permission errors for pip/ensurepip
+        env['HOME'] = env.get('HOME', '/tmp')
         with current_directory(self.get_build_dir(arch.arch)):
             hostpython = sh.Command(self.hostpython_location)
             # Ensure pip is available first
