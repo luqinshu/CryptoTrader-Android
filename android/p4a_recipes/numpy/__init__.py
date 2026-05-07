@@ -24,18 +24,35 @@ class NumpyRecipe(CompiledComponentsPythonRecipe):
     ]
 
     def _fix_distutils_import(self, arch):
-        """Fix numpy's distutils.msvccompiler import for Python 3.12+."""
-        mingw_path = join(self.get_build_dir(arch.arch),
-                          'numpy', 'distutils', 'mingw32ccompiler.py')
-        with open(mingw_path, 'r') as f:
-            content = f.read()
-        old = 'from distutils.msvccompiler import get_build_version as get_build_msvc_version'
-        new = 'try:\n    from distutils.msvccompiler import get_build_version as get_build_msvc_version\nexcept (ImportError, ModuleNotFoundError):\n    get_build_msvc_version = lambda: 14.0'
-        if old in content:
-            content = content.replace(old, new)
-            with open(mingw_path, 'w') as f:
-                f.write(content)
-            info('Fixed distutils.msvccompiler import in numpy')
+        """Fix numpy's distutils imports for Python 3.12+."""
+        import os
+        build_dir = self.get_build_dir(arch.arch)
+
+        # Fix 1: msvccompiler (not in setuptools._distutils)
+        target = os.path.join(build_dir, 'numpy', 'distutils', 'mingw32ccompiler.py')
+        if os.path.exists(target):
+            with open(target) as f:
+                content = f.read()
+            old = 'from distutils.msvccompiler import get_build_version as get_build_msvc_version'
+            if old in content:
+                new = 'try:\n    from distutils.msvccompiler import get_build_version as get_build_msvc_version\nexcept ImportError:\n    get_build_msvc_version = lambda: 14.0'
+                content = content.replace(old, new)
+                with open(target, 'w') as f:
+                    f.write(content)
+                info('Fixed msvccompiler import')
+
+        # Fix 2: distutils.version (available in setuptools._distutils)
+        target = os.path.join(build_dir, 'tools', 'cythonize.py')
+        if os.path.exists(target):
+            with open(target) as f:
+                content = f.read()
+            old = 'from distutils.version import LooseVersion'
+            if old in content:
+                new = 'from setuptools._distutils.version import LooseVersion'
+                content = content.replace(old, new)
+                with open(target, 'w') as f:
+                    f.write(content)
+                info('Fixed LooseVersion import in cythonize.py')
 
     def get_recipe_env(self, arch=None, with_flags_in_cc=True):
         env = super().get_recipe_env(arch, with_flags_in_cc)
@@ -49,6 +66,8 @@ class NumpyRecipe(CompiledComponentsPythonRecipe):
         env = self.get_recipe_env(arch)
         with current_directory(self.get_build_dir(arch.arch)):
             hostpython = sh.Command(self.hostpython_location)
+            # Ensure setuptools is installed (provides _distutils for Python 3.12+)
+            shprint(hostpython, '-m', 'pip', 'install', 'setuptools', '-q', _env=env)
             shprint(hostpython, 'setup.py', self.build_cmd, '-v', _env=env, *self.setup_extra_args)
             build_dir = glob.glob('build/lib.*')[0]
             shprint(sh.find, build_dir, '-name', '"*.o"', '-exec', env['STRIP'], '{}', ';', _env=env)
