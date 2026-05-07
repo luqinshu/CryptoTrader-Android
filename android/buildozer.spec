@@ -29,7 +29,7 @@ android.display_cutout = True
 android.allow_backup = False
 android.accept_sdk_license = True
 
-p4a.branch = master
+p4a.branch = develop
 p4a.local_recipes = ./p4a_recipes
 
 [buildozer]

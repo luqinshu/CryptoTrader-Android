@@ -21,6 +21,7 @@ class NumpyRecipe(CompiledComponentsPythonRecipe):
         join("patches", "remove-default-paths.patch"),
         join("patches", "add_libm_explicitly_to_build.patch"),
         join("patches", "ranlib.patch"),
+        join("patches", "fix-distutils-import.patch"),
     ]
 
     def get_recipe_env(self, arch=None, with_flags_in_cc=True):

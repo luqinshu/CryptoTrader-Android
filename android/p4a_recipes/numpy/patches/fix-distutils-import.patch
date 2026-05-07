@@ -1,0 +1,15 @@
+diff -ruN numpy.orig/numpy/distutils/mingw32ccompiler.py numpy/numpy/distutils/mingw32ccompiler.py
+--- numpy.orig/numpy/distutils/mingw32ccompiler.py	2026-05-07 11:30:00
++++ numpy/numpy/distutils/mingw32ccompiler.py	2026-05-07 11:30:00
+@@ -25,7 +25,10 @@
+ from distutils.cygwinccompiler import Mingw32CCompiler
+ except (ImportError, AttributeError):
+     from setuptools._distutils.cygwinccompiler import Mingw32CCompiler
+-from distutils.msvccompiler import get_build_version as get_build_msvc_version
++try:
++    from distutils.msvccompiler import get_build_version as get_build_msvc_version
++except (ImportError, ModuleNotFoundError):
++    get_build_msvc_version = lambda: 14.0
+ 
+ from numpy.distutils.ccompiler_opt import NPY_CXX_FLAGS
+ from numpy.distutils import log
