@@ -24,7 +24,12 @@ class NumpyRecipe(CompiledComponentsPythonRecipe):
     ]
 
     def _fix_distutils_import(self, arch):
-        """Fix ALL numpy distutils imports for Python 3.12+ (distutils removed)."""
+        """Fix ALL numpy distutils imports for Python 3.12+ (distutils removed).
+        
+        Strategy: add 'import setuptools._distutils as distutils' as a shim,
+        then replace all 'from distutils.X import' -> 'from setuptools._distutils.X import'.
+        This handles both direct imports AND bare 'distutils.XXX' references.
+        """
         import os
         build_dir = self.get_build_dir(arch.arch)
 
@@ -47,7 +52,7 @@ class NumpyRecipe(CompiledComponentsPythonRecipe):
                 modified = False
                 new_content = content
 
-                # Special: msvccompiler
+                # Fix 1: msvccompiler special case (not in setuptools._distutils)
                 if 'from distutils.msvccompiler import' in new_content:
                     new_content = new_content.replace(
                         'from distutils.msvccompiler import get_build_version as get_build_msvc_version',
@@ -55,20 +60,45 @@ class NumpyRecipe(CompiledComponentsPythonRecipe):
                     )
                     modified = True
 
-                # Generic: replace "from distutils.X" with "from setuptools._distutils.X"
-                if 'from distutils.' in new_content:
+                # Fix 2: Replace distutils imports with setuptools._distutils
+                # AND add compatibility alias for bare distutils references
+                replaced_imports = False
+                if 'from distutils.' in new_content or 'import distutils.' in new_content:
                     lines = new_content.split('\n')
                     new_lines = []
                     for line in lines:
                         stripped = line.lstrip()
                         if stripped.startswith('from distutils.') and 'msvccompiler' not in stripped:
                             line = line.replace('from distutils.', 'from setuptools._distutils.')
+                            replaced_imports = True
                         elif stripped.startswith('import distutils.') and 'msvccompiler' not in stripped:
                             line = line.replace('import distutils.', 'import setuptools._distutils.')
+                            replaced_imports = True
                         new_lines.append(line)
                     new_content = '\n'.join(new_lines)
-                    if new_content != content:
-                        modified = True
+                
+                # Fix 3: Add 'import setuptools._distutils as distutils' alias
+                # for files that use bare 'distutils.XXX' references
+                has_bare_distutils = any(
+                    'distutils.' in line and not line.lstrip().startswith(('from ', 'import ', '#'))
+                    for line in new_content.split('\n')
+                )
+                if has_bare_distutils and 'import setuptools._distutils as distutils' not in new_content:
+                    # Insert after existing imports
+                    import re
+                    lines = new_content.split('\n')
+                    # Find the last import line
+                    last_import_idx = 0
+                    for i, line in enumerate(lines):
+                        stripped = line.lstrip()
+                        if stripped.startswith(('import ', 'from ')) and 'setuptools._distutils' not in line:
+                            last_import_idx = i
+                    lines.insert(last_import_idx + 1, 'import setuptools._distutils as distutils  # compat shim for Python 3.12+')
+                    new_content = '\n'.join(lines)
+                    replaced_imports = True
+                
+                if replaced_imports:
+                    modified = True
 
                 if modified:
                     with open(fpath, 'w') as f:
