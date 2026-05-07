@@ -30,7 +30,7 @@ android.allow_backup = False
 android.accept_sdk_license = True
 
 p4a.branch = master
-p4a.local_recipes = ./p4a_recipes
+# p4a.local_recipes = ./p4a_recipes
 
 # Release signing (uncomment and set env vars to build release)
 # android.release_artifact = apk
