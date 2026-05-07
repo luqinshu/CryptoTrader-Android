@@ -10,7 +10,7 @@ import shutil
 
 class NumpyRecipe(CompiledComponentsPythonRecipe):
 
-    version = '1.22.3'
+    version = '1.23.5'
     url = 'https://pypi.python.org/packages/source/n/numpy/numpy-{version}.zip'
     site_packages_name = 'numpy'
     depends = ['setuptools']
