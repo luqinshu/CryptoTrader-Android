@@ -1,6 +1,5 @@
-diff -ruN numpy.orig/numpy/distutils/mingw32ccompiler.py numpy/numpy/distutils/mingw32ccompiler.py
---- numpy.orig/numpy/distutils/mingw32ccompiler.py	2026-05-07 11:30:00
-+++ numpy/numpy/distutils/mingw32ccompiler.py	2026-05-07 11:30:00
+--- numpy/distutils/mingw32ccompiler.py
++++ numpy/distutils/mingw32ccompiler.py
 @@ -25,7 +25,10 @@
  from distutils.cygwinccompiler import Mingw32CCompiler
  except (ImportError, AttributeError):
