@@ -54,7 +54,7 @@ class NumpyRecipe(CompiledComponentsPythonRecipe):
         self._rebuild_compiled_components(arch, env)
         self.setup_extra_args = []
 
-    def get_hostrecipe_env(self, arch):
+    def get_hostrecipe_env(self, arch=None):
         env = super().get_hostrecipe_env(arch)
         env['RANLIB'] = shutil.which('ranlib')
         return env
