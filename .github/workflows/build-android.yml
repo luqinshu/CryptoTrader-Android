@@ -41,9 +41,15 @@ jobs:
     - name: Build APK
       working-directory: android
       run: |
+        set +o pipefail
         buildozer -v android debug 2>&1 | tee buildozer_output.txt
         EXIT_CODE=${PIPESTATUS[0]}
+        set -o pipefail
         echo "BUILDOZER EXIT CODE: ${EXIT_CODE}"
+        if [ "${EXIT_CODE}" -ne 0 ]; then
+          echo "BUILD FAILED WITH CODE ${EXIT_CODE}"
+          tail -50 buildozer_output.txt
+        fi
         exit ${EXIT_CODE}
       env:
         BUILDOZER_ALLOW_ROOT: 1
