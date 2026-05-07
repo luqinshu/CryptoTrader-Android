@@ -101,6 +101,9 @@ class NumpyRecipe(CompiledComponentsPythonRecipe):
             host_bin = dirname(self.hostpython_location)
             shprint(hostpython, '-m', 'ensurepip', '-U',
                     _env={"HOME": "/tmp", "PATH": host_bin})
+            # Install Cython (numpy needs it for setup.py build_ext)
+            shprint(hostpython, '-m', 'pip', 'install', 'cython', '-q',
+                    _env={"HOME": "/tmp", "PATH": host_bin})
             shprint(hostpython, 'setup.py', self.build_cmd, '-v', _env=env, *self.setup_extra_args)
             build_dir = glob.glob('build/lib.*')[0]
             shprint(sh.find, build_dir, '-name', '"*.o"', '-exec', env['STRIP'], '{}', ';', _env=env)
