@@ -11,7 +11,7 @@ import shutil
 class NumpyRecipe(CompiledComponentsPythonRecipe):
 
     version = '1.26.4'
-    url = 'https://pypi.python.org/packages/source/n/numpy/numpy-{version}.zip'
+    url = 'https://files.pythonhosted.org/packages/source/n/numpy/numpy-{version}.tar.gz'
     site_packages_name = 'numpy'
     depends = ['setuptools']
     install_in_hostpython = True
