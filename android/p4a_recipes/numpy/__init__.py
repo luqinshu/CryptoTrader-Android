@@ -2,7 +2,7 @@ from pythonforandroid.recipe import CompiledComponentsPythonRecipe
 from pythonforandroid.logger import shprint, info
 from pythonforandroid.util import current_directory
 from multiprocessing import cpu_count
-from os.path import join, dirname
+from os.path import join, dirname, exists
 import glob
 import sh
 import shutil
@@ -64,11 +64,16 @@ class NumpyRecipe(CompiledComponentsPythonRecipe):
         info('Building compiled components in {}'.format(self.name))
         self._fix_distutils_import(arch)
         env = self.get_recipe_env(arch)
-        # Add CI Python's site-packages to PYTHONPATH so hostpython3 can find Cython
+        # Copy Cython from CI Python to hostpython3's site-packages
         import sysconfig as _sc
         _ci_sp = _sc.get_path('purelib')
-        if _ci_sp not in env.get('PYTHONPATH', ''):
-            env['PYTHONPATH'] = _ci_sp + ':' + env.get('PYTHONPATH', '')
+        _hp_sp = join(dirname(dirname(dirname(self.hostpython_location))), 'Lib', 'site-packages')
+        _cython_src = join(_ci_sp, 'Cython')
+        if exists(_cython_src):
+            _cython_dst = join(_hp_sp, 'Cython')
+            if not exists(_cython_dst):
+                shutil.copytree(_cython_src, _cython_dst)
+                info('Copied Cython to hostpython3 site-packages')
         with current_directory(self.get_build_dir(arch.arch)):
             hostpython = sh.Command(self.hostpython_location)
             shprint(hostpython, 'setup.py', self.build_cmd, '-v', _env=env, *self.setup_extra_args)
