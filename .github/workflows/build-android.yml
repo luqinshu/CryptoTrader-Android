@@ -110,11 +110,23 @@ jobs:
             -H "Content-Type: text/plain" \
             --data-binary @buildozer_output.txt \
             "https://uploads.github.com/repos/${{ github.repository }}/releases/$RELEASE_ID/assets?name=buildozer_output.txt"
-          echo ""
-          echo "Build log available at: https://github.com/${{ github.repository }}/releases/tag/$TAG"
-        else
-          echo "Failed to create release or output file missing"
         fi
+
+        # Upload APK to release if build succeeded
+        if [ -n "$RELEASE_ID" ] && [ "${{ job.status }}" = "success" ]; then
+          APK=$(ls bin/*.apk 2>/dev/null | head -1)
+          if [ -n "$APK" ]; then
+            curl -s -X POST \
+              -H "Authorization: token $GH_TOKEN" \
+              -H "Content-Type: application/vnd.android.package-archive" \
+              --data-binary @"$APK" \
+              "https://uploads.github.com/repos/${{ github.repository }}/releases/$RELEASE_ID/assets?name=$(basename "$APK")"
+            echo ""
+            echo "APK download: https://github.com/${{ github.repository }}/releases/download/$TAG/$(basename "$APK")"
+          fi
+        fi
+
+        echo "Release page: https://github.com/${{ github.repository }}/releases/tag/$TAG"
 
     - name: Upload build logs
       if: always()
