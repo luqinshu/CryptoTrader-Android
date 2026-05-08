@@ -181,23 +181,24 @@ class App(App):
 
         # strategy picker
         p.add_widget(L("扫描策略", 15, C_TAB, True))
-        sr2 = BoxLayout(size_hint_y=None, height=dp(48), spacing=dp(8))
+        sr2 = BoxLayout(size_hint_y=None, height=dp(48), spacing=dp(6))
         self.ssp = Spinner(text='OKX小时线波段共振策略', values=self._list_strats(),
-                           size_hint_x=0.6, background_color=C_CRD, color=C_TXT)
+                           size_hint_x=0.5, background_color=C_CRD, color=C_TXT)
         _f(self.ssp)
         sr2.add_widget(self.ssp)
         sr2.add_widget(B("加载策略", C_BTN, 13, cb=self._load_strat))
+        sr2.add_widget(B("从文件加载", (0.25, 0.45, 0.30, 1), 13, cb=self._load_from_file))
         p.add_widget(sr2)
 
-        # timer
-        p.add_widget(L("定时扫描", 15, C_TAB, True))
+        # timer row
+        p.add_widget(L("定时扫描(秒)", 15, C_TAB, True))
         tr = BoxLayout(size_hint_y=None, height=dp(48), spacing=dp(8))
         self.tm = TextInput(text=str(self.cfg.get('interval','600')), hint_text="间隔秒数", multiline=False,
                             font_size=sp(14), background_color=C_CRD, foreground_color=C_TXT,
                             size_hint_y=None, height=dp(48), input_filter='int')
         _f(self.tm)
         tr.add_widget(self.tm)
-        self.ab = B("开启定时", C_WARN, 13, cb=self._toggle_auto)
+        self.ab = B("启动定时扫描", C_WARN, 13, cb=self._start_auto)
         tr.add_widget(self.ab)
         p.add_widget(tr)
 
@@ -214,11 +215,11 @@ class App(App):
         sv.add_widget(self.rbox)
         p.add_widget(sv)
 
-        # scan button
-        br = BoxLayout(size_hint_y=None, height=dp(56), spacing=dp(8))
-        self.sb = B("开始扫描", C_BTN, 16, cb=self._scan)
-        br.add_widget(self.sb)
-        br.add_widget(B("保存配置到文件", (0.20, 0.20, 0.25, 1), 13, cb=lambda x: self._pop("配置", "已保存" if self._save() else "失败")))
+        # three scan buttons
+        br = BoxLayout(size_hint_y=None, height=dp(56), spacing=dp(6))
+        br.add_widget(B("手动扫描", C_BTN, 14, cb=lambda x: self._scan(False)))
+        br.add_widget(B("停止扫描", C_RED, 14, cb=self._stop_scan))
+        br.add_widget(B("定时扫描", C_WARN, 14, cb=self._start_auto))
         p.add_widget(br)
         return p
 
@@ -228,17 +229,40 @@ class App(App):
                                  passphrase=self.cfg.get('passphrase',''), testnet=False,
                                  proxy_url=self.cfg.get('proxy_url','').strip() or None)
 
-    def _scan(self, btn):
+    def _scan(self, auto=False):
         if self.scanning: return
         k = self.cfg.get('api_key',''); s = self.cfg.get('secret_key','')
         if not k or not s: self._pop("提示", "请先在 API 设置中填写 Key"); return
-        self.scanning = True; self.sb.disabled = True; self.sb.text = "扫描中..."; self.rbox.clear_widgets(); self.pb.value = 0
-        self._status("连接 OKX...")
+        self.scanning = True
+        self._cancel_flag = False
+        self._status("连接 OKX..."); self.pb.value = 0
+        self.rbox.clear_widgets()
         threading.Thread(target=self._scan_thread, daemon=True).start()
+
+    def _stop_scan(self, btn):
+        if self.scanning:
+            self._cancel_flag = True
+            self._status("正在停止...")
+        else:
+            self._status("没有正在进行的扫描")
+
+    def _start_auto(self, btn):
+        if self.auto_timer:
+            self.auto_timer.cancel(); self.auto_timer = None
+            self.ab.text = "启动定时扫描"; self.ab.background_color = C_WARN
+            self._status("定时已停止")
+        else:
+            try: sec = max(60, int(self.tm.text))
+            except ValueError: sec = 600
+            self.ab.text = "停止定时扫描"; self.ab.background_color = C_RED
+            self._save()
+            self._status(f"定时 {sec}秒"); self._scan(auto=True)
+            self.auto_timer = Clock.schedule_interval(lambda dt: self._scan(auto=True), sec)
 
     def _scan_thread(self):
         try:
             self._init_okx(); self._status("获取行情..."); self._prog(5)
+            if self._cancel_flag: return
             r = self.okx.get_tickers('SWAP')
             if not isinstance(r, dict) or r.get('code') != '0':
                 self._err(f"API错误: {r.get('msg','?') if isinstance(r,dict) else '连接失败'}"); return
@@ -249,11 +273,14 @@ class App(App):
             self._status(f"{len(active)} 品种分析中..."); self._prog(10)
             found = 0
             for i, t in enumerate(active):
+                if self._cancel_flag:
+                    self._status(f"已取消 (分析 {found} 个)"); self._prog(0); return
                 iid = t['instId']; pct = 10 + int(85*(i+1)/len(active))
                 self._prog(pct); self._status(f"[{i+1}/{len(active)}] {iid}")
                 try:
                     kls = {}
                     for bar in ['1D','1H','15m','3m']:
+                        if self._cancel_flag: return
                         rr = self.okx.get_kline(iid, bar=bar, limit=200)
                         if isinstance(rr, dict) and rr.get('code')=='0' and rr.get('data'):
                             kls[bar] = rr['data']
@@ -268,9 +295,7 @@ class App(App):
                 time.sleep(0.15)
             self._status(f"完成！{found} 个机会"); self._prog(100)
         except Exception as e: self._err(f"扫描失败: {e}")
-        finally: self.scanning = False; Clock.schedule_once(lambda dt: self._rst())
-
-    def _rst(self): self.sb.disabled = False; self.sb.text = "开始扫描"
+        finally: self.scanning = False
 
     def _add_res(self, r):
         def _f(dt):
@@ -301,6 +326,60 @@ class App(App):
         return names or ['OKX小时线波段共振策略']
 
     def _load_strat(self, btn):
+        """Load selected strategy from spinner"""
+        name = self.ssp.text
+        if not name: return
+        rev = {v:k for k,v in self._smap.items()}
+        fname = rev.get(name, name)
+        fpath = os.path.join(self.dir, 'strategies', fname+'.py')
+        self._do_load_file(fpath, fname+'.py')
+
+    def _load_from_file(self, btn):
+        """Open file browser to select a .py strategy file"""
+        strat_dir = os.path.join(self.dir, 'strategies')
+        # List all .py files in strategies dir
+        files = sorted(glob.glob(os.path.join(strat_dir, '*.py')))
+        display = [os.path.basename(f) for f in files if not os.path.basename(f).startswith('_')]
+        
+        if not display:
+            self._pop("提示", "strategies 目录下无策略文件")
+            return
+
+        c = BoxLayout(orientation='vertical', padding=dp(8), spacing=dp(4))
+        c.add_widget(L("选择策略文件:", 14, C_TAB, True))
+        sv = ScrollView()
+        flist = BoxLayout(orientation='vertical', size_hint_y=None, spacing=dp(2))
+        flist.bind(minimum_height=flist.setter('height'))
+        for fn in display:
+            fp = os.path.join(strat_dir, fn)
+            flist.add_widget(B(fn, C_CRD, 12, cb=lambda x, p=fp, n=fn: self._do_load_file(p, n)))
+        sv.add_widget(flist)
+        c.add_widget(sv)
+
+        pp = Popup(title="加载策略文件", content=c, size_hint=(0.9, 0.75),
+                   background_color=(0.12, 0.12, 0.15, 0.97), separator_color=C_TAB)
+        c.add_widget(B("关闭", C_BTN, 13, cb=pp.dismiss))
+        pp.open()
+
+    def _do_load_file(self, path, filename):
+        try:
+            name = filename.replace('.py', '')
+            spec = importlib.util.spec_from_file_location(name, path)
+            if not spec: self._pop("错误", "无法解析文件"); return
+            mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
+            scanner_cls = None
+            for cls_name in ['OKXHourSwingScanner', 'XiaoYueBollMacdScanner',
+                             'TrendSqueezeBreakoutScannerV3', 'AICrossSectionDualFactorComboScanner',
+                             'ThreeMinuteMultiTimeframePullbackStrategy']:
+                if hasattr(mod, cls_name):
+                    scanner_cls = getattr(mod, cls_name); break
+            if scanner_cls:
+                self.scanner = scanner_cls()
+                self._pop("成功", f"已加载: {filename}")
+            else:
+                self._pop("提示", f"文件中未找到策略类: {filename}")
+        except Exception as e:
+            self._pop("错误", f"加载失败: {e}")
         name = self.ssp.text
         if not name: return
         # reverse map display -> filename
@@ -320,17 +399,6 @@ class App(App):
                     self.scanner = getattr(mod, cls_name)(); self._pop("成功", f"已加载: {name}"); return
             self._pop("提示", "策略类未找到")
         except Exception as e: self._pop("错误", f"加载失败: {e}")
-
-    def _toggle_auto(self, btn):
-        if self.auto_timer:
-            self.auto_timer.cancel(); self.auto_timer = None
-            self.ab.text = "开启定时"; self.ab.background_color = C_WARN; self._status("定时已停止")
-        else:
-            try: sec = max(60, int(self.tm.text))
-            except ValueError: sec = 600
-            self.ab.text = "停止定时"; self.ab.background_color = C_RED
-            self._status(f"定时 {sec}秒"); self._scan(None)
-            self.auto_timer = Clock.schedule_interval(lambda dt: self._scan(None), sec)
 
     # ═══════════════════ Pool ═══════════════════
     def _pool_page(self):
