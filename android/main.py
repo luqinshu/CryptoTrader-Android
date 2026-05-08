@@ -5,6 +5,12 @@ Kivy multi-tab trading platform
 import os, sys, json, threading, time, glob, traceback, importlib.util, warnings
 warnings.filterwarnings('ignore')
 
+# Desktop: set phone-like window before Kivy starts
+from kivy.config import Config
+Config.set('graphics', 'width', '390')
+Config.set('graphics', 'height', '844')
+Config.set('graphics', 'resizable', False)
+
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 def _crash(msg):
