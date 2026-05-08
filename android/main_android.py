@@ -6,7 +6,6 @@ import os, sys, json, threading, time, glob, traceback, importlib.util
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-# ── crash log ──────────────────────────────────────────────
 def _crash(msg):
     try:
         with open('/sdcard/cs_crash.log', 'a') as f:
@@ -17,7 +16,6 @@ def _crash(msg):
 _crash("App starting")
 _crash(f"Python {sys.version}")
 
-# ── imports ────────────────────────────────────────────────
 try:
     from kivy.app import App
     from kivy.uix.boxlayout import BoxLayout
@@ -34,11 +32,9 @@ try:
     from kivy.graphics import Color, Rectangle
 
     _crash("Kivy imports OK")
-
     from src.api.okx_client import OKXClient
     from src.scanner.base_scanner import ScannerSymbol
     from strategies.okx_swing import OKXHourSwingScanner
-
     _crash("App imports OK")
     _IMPORTS_OK = True
 except Exception as e:
@@ -46,29 +42,23 @@ except Exception as e:
     _IMPORTS_OK = False
     _IMPORT_ERR = str(e)
 
-# ── font setup ─────────────────────────────────────────────
+# font
 from kivy.core.text import LabelBase
 FONT_NAME = None
-_font_paths = [
+for fp in [
     os.path.join(os.path.dirname(os.path.abspath(__file__)), 'fonts', 'PingFang.ttc'),
     '/system/fonts/NotoSansCJK-Regular.ttc',
     '/system/fonts/DroidSansFallback.ttf',
-]
-for fp in _font_paths:
+]:
     try:
         if os.path.exists(fp):
             LabelBase.register(name='CNFont', fn_regular=fp)
             FONT_NAME = 'CNFont'
-            _crash(f"Font loaded: {fp}")
             break
     except Exception:
         pass
-if not FONT_NAME:
-    _crash("No Chinese font found, using default")
 
-Window.clearcolor = (0.10, 0.10, 0.13, 1)
-
-# ── colors ─────────────────────────────────────────────────
+# theme
 C_BG   = (0.10, 0.10, 0.13, 1)
 C_CARD = (0.16, 0.16, 0.20, 1)
 C_BTN  = (0.18, 0.50, 0.80, 1)
@@ -77,202 +67,259 @@ C_WARN = (0.90, 0.60, 0.10, 1)
 C_RED  = (0.85, 0.20, 0.20, 1)
 C_TEXT = (0.90, 0.90, 0.95, 1)
 C_SUB  = (0.55, 0.55, 0.60, 1)
-C_TAB_ACTIVE = (0.18, 0.55, 0.85, 1)
-C_TAB_INACTIVE = (0.12, 0.12, 0.16, 1)
+C_TAB  = (0.18, 0.55, 0.85, 1)
+C_TAB_OFF = (0.12, 0.12, 0.16, 1)
 
-def _font(widget):
-    if FONT_NAME:
-        widget.font_name = FONT_NAME
+def _font(w):
+    if FONT_NAME: w.font_name = FONT_NAME
 
-def _lbl(text, size=13, color=C_TEXT, bold=False, halign='left'):
-    lbl = Label(text=text, font_size=sp(size), color=color, bold=bold, halign=halign, valign='middle')
-    lbl.bind(size=lbl.setter('text_size'))
-    _font(lbl)
-    return lbl
+def _lbl(text, s=13, c=C_TEXT, b=False, h='left'):
+    l = Label(text=text, font_size=sp(s), color=c, bold=b, halign=h, valign='middle')
+    l.bind(size=l.setter('text_size'))
+    _font(l)
+    return l
 
-def _btn(text, bg=C_BTN, size=13, bold=False):
-    btn = Button(text=text, font_size=sp(size), bold=bold,
-                 background_color=bg, color=C_TEXT,
-                 background_normal='')
+def _btn(text, bg=C_BTN, s=13, b=False, cb=None):
+    btn = Button(text=text, font_size=sp(s), bold=b, background_color=bg, color=C_TEXT, background_normal='')
     _font(btn)
+    if cb: btn.bind(on_release=cb)
     return btn
 
-def _input(hint='', text='', pw=False):
-    ti = TextInput(hint_text=hint, text=text, password=pw,
-                   multiline=False, font_size=sp(13),
-                   background_color=C_CARD, foreground_color=C_TEXT,
-                   cursor_color=C_TAB_ACTIVE, padding=[dp(8), dp(8)])
-    _font(ti)
-    return ti
+def _in(hint='', text='', pw=False):
+    t = TextInput(hint_text=hint, text=text, password=pw, multiline=False,
+                  font_size=sp(13), background_color=C_CARD, foreground_color=C_TEXT,
+                  cursor_color=C_TAB, padding=[dp(8), dp(8)])
+    _font(t)
+    return t
 
 
 class CryptoApp(App):
     def build(self):
-        Window.size = (360, 748)
+        # Let Kivy manage size on Android
+        Window.minimum_width, Window.minimum_height = 320, 480
         self._data_dir = os.path.dirname(os.path.abspath(__file__))
-        self.config_file = os.path.join(self._data_dir, "scanner_config.json")
+        self.cfg_file = os.path.join(self._data_dir, "scanner_config.json")
         self._cfg = self._load_cfg()
         self.okx_client = None
         self.scanner = OKXHourSwingScanner()
         self.is_scanning = False
+        self.pool_results = []  # trade pool
+        self.monitor_list = []  # monitor symbols
 
-        self.root = BoxLayout(orientation='vertical')
+        root = BoxLayout(orientation='vertical')
 
-        # ── title bar ──────────────────────────────────
-        title_bar = BoxLayout(size_hint_y=None, height=dp(44))
-        with title_bar.canvas.before:
-            Color(*C_TAB_INACTIVE)
-            self._tb_bg = Rectangle(pos=title_bar.pos, size=title_bar.size)
-        title_bar.bind(pos=lambda i, v: setattr(self._tb_bg, 'pos', v),
-                       size=lambda i, v: setattr(self._tb_bg, 'size', v))
-        title_bar.add_widget(_lbl("CryptoScanner Pro", 18, C_TAB_ACTIVE, True))
-        self.root.add_widget(title_bar)
+        # title
+        tb = BoxLayout(size_hint_y=None, height=dp(44))
+        with tb.canvas.before:
+            Color(*C_TAB_OFF)
+            self._tbbg = Rectangle(pos=tb.pos, size=tb.size)
+        tb.bind(pos=lambda i, v: setattr(self._tbbg, 'pos', v),
+                size=lambda i, v: setattr(self._tbbg, 'size', v))
+        tb.add_widget(_lbl("CryptoScanner Pro", 18, C_TAB, True))
+        root.add_widget(tb)
 
-        # ── tab bar ────────────────────────────────────
-        self.tab_names = ['交易对扫描', '交易池', '监控池', '数据库']
-        self.tab_buttons = []
-        tab_bar = BoxLayout(size_hint_y=None, height=dp(40), spacing=dp(2))
-        for i, name in enumerate(self.tab_names):
-            btn = _btn(name, C_TAB_INACTIVE if i > 0 else C_TAB_ACTIVE, 13)
-            btn.tab_idx = i
-            btn.bind(on_release=self._switch_tab)
-            self.tab_buttons.append(btn)
-            tab_bar.add_widget(btn)
-        self.root.add_widget(tab_bar)
+        # tabs
+        self.tabs = ['交易对扫描', '交易池', '监控池', '数据库']
+        self.tab_btns = []
+        tr = BoxLayout(size_hint_y=None, height=dp(40), spacing=dp(2))
+        for i, n in enumerate(self.tabs):
+            b = Button(text=n, font_size=sp(13), color=C_TEXT,
+                       background_color=C_TAB if i == 0 else C_TAB_OFF,
+                       background_normal='')
+            b.tab_idx = i
+            b.bind(on_release=self._switch_tab)
+            _font(b)
+            self.tab_btns.append(b)
+            tr.add_widget(b)
+        root.add_widget(tr)
 
-        # ── content area ───────────────────────────────
-        self.tab_content = BoxLayout()
-        self.root.add_widget(self.tab_content)
+        # pages
+        self.pages = [self._scanner(), self._pool(), self._monitor(), self._database()]
+        self.content = BoxLayout()
+        self.content.add_widget(self.pages[0])
+        root.add_widget(self.content)
 
-        # ── status bar ─────────────────────────────────
-        self.status_lbl = _lbl("就绪", 11, C_SUB)
-        self.root.add_widget(BoxLayout(size_hint_y=None, height=dp(24), children=[self.status_lbl]))
+        # status
+        self.slbl = _lbl("就绪", 11, C_SUB)
+        root.add_widget(BoxLayout(size_hint_y=None, height=dp(24), children=[self.slbl]))
+        return root
 
-        # ── build pages ────────────────────────────────
-        self._build_scanner_page()
-        self._build_trade_pool_page()
-        self._build_monitor_page()
-        self._build_database_page()
-
-        self._switch_tab(self.tab_buttons[0])
-        return self.root
-
-    # ── tab switching ───────────────────────────────────
     def _switch_tab(self, btn):
-        for b in self.tab_buttons:
-            b.background_color = C_TAB_ACTIVE if b is btn else C_TAB_INACTIVE
-        self.tab_content.clear_widgets()
-        idx = btn.tab_idx
-        pages = [self._scanner_page, self._pool_page, self._monitor_page, self._db_page]
-        self.tab_content.add_widget(pages[idx])
+        for b in self.tab_btns:
+            b.background_color = C_TAB if b is btn else C_TAB_OFF
+        self.content.clear_widgets()
+        self.content.add_widget(self.pages[btn.tab_idx])
 
-    # ═══════════════════════════════════════════════════════
-    # TAB 1: 交易对扫描
-    # ═══════════════════════════════════════════════════════
-    def _build_scanner_page(self):
-        page = BoxLayout(orientation='vertical', padding=dp(8), spacing=dp(6))
-        scroll = ScrollView()
-        content = BoxLayout(orientation='vertical', size_hint_y=None, spacing=dp(6))
-        content.bind(minimum_height=content.setter('height'))
+    # ═══════════════════════ scanner ═══════════════════════
+    def _scanner(self):
+        p = BoxLayout(orientation='vertical', padding=dp(8), spacing=dp(4))
+        sv = ScrollView()
+        c = BoxLayout(orientation='vertical', size_hint_y=None, spacing=dp(4))
+        c.bind(minimum_height=c.setter('height'))
 
-        content.add_widget(_lbl("API 配置", 14, C_TAB_ACTIVE, True))
-        self.api_key_ti = _input("OKX API Key")
-        self.secret_ti = _input("Secret Key", pw=True)
-        self.phrase_ti = _input("Passphrase", pw=True)
-        self.proxy_ti = _input("代理(可选)", self._cfg.get('proxy_url', ''))
-        content.add_widget(self.api_key_ti)
-        content.add_widget(self.secret_ti)
-        content.add_widget(self.phrase_ti)
-        content.add_widget(self.proxy_ti)
+        c.add_widget(_lbl("API 配置", 14, C_TAB, True))
+        self.api_ti = _in("OKX API Key")
+        self.sec_ti = _in("Secret Key", pw=True)
+        self.phr_ti = _in("Passphrase", pw=True)
+        self.prx_ti = _in("代理(可选)", self._cfg.get('proxy_url', ''))
+        c.add_widget(self.api_ti)
+        c.add_widget(self.sec_ti)
+        c.add_widget(self.phr_ti)
+        c.add_widget(self.prx_ti)
 
-        content.add_widget(_lbl("策略选择", 14, C_TAB_ACTIVE, True))
-        row = BoxLayout(size_hint_y=None, height=dp(40), spacing=dp(6))
-        self.strat_spinner = Spinner(text='OKX小时线波段共振策略',
-            values=['OKX小时线波段共振策略'], size_hint_x=0.65,
-            background_color=C_CARD, color=C_TEXT)
-        _font(self.strat_spinner)
-        row.add_widget(self.strat_spinner)
-        row.add_widget(_btn("加载", C_BTN, 12))
-        content.add_widget(row)
+        c.add_widget(_lbl("策略", 14, C_TAB, True))
+        c.add_widget(_lbl("当前: OKX小时线波段共振策略", 12, C_SUB))
 
-        row2 = BoxLayout(size_hint_y=None, height=dp(40), spacing=dp(6))
-        row2.add_widget(_btn("测试连接", (0.40, 0.40, 0.25, 1), 12))
-        row2.add_widget(_btn("保存配置", (0.20, 0.20, 0.25, 1), 12))
-        content.add_widget(row2)
+        r1 = BoxLayout(size_hint_y=None, height=dp(40), spacing=dp(6))
+        r1.add_widget(_btn("测试连接", (0.40, 0.40, 0.25, 1), 12, cb=self._test_conn))
+        r1.add_widget(_btn("保存配置", (0.20, 0.20, 0.25, 1), 12, cb=lambda x: self._popup("配置", "已保存" if self._save_cfg() else "失败")))
+        c.add_widget(r1)
 
-        content.add_widget(_lbl("定时扫描", 14, C_TAB_ACTIVE, True))
-        tr = BoxLayout(size_hint_y=None, height=dp(40), spacing=dp(6))
-        self.timer_ti = _input("间隔(秒)", self._cfg.get('auto_scan_interval', '600'))
-        self.timer_ti.size_hint_x = 0.4
-        tr.add_widget(self.timer_ti)
-        tr.add_widget(_lbl("秒", 12, C_SUB))
-        tr.add_widget(_btn("开启定时", (0.45, 0.35, 0.25, 1), 12))
-        content.add_widget(tr)
+        c.add_widget(_lbl("定时扫描", 14, C_TAB, True))
+        self.tmr_ti = _in("间隔(秒)", self._cfg.get('auto_scan_interval', '600'))
+        r2 = BoxLayout(size_hint_y=None, height=dp(40), spacing=dp(6))
+        r2.add_widget(self.tmr_ti)
+        self.auto_btn = _btn("开启定时", (0.45, 0.35, 0.25, 1), 12, cb=self._toggle_auto)
+        r2.add_widget(self.auto_btn)
+        c.add_widget(r2)
 
-        self.scan_progress = ProgressBar(value=0, size_hint_y=None, height=dp(14))
-        content.add_widget(self.scan_progress)
-        self.scan_status = _lbl("就绪：配置 API 后点击扫描", 12, C_SUB)
-        content.add_widget(self.scan_status)
+        self.pbar = ProgressBar(value=0, size_hint_y=None, height=dp(14))
+        c.add_widget(self.pbar)
+        self.ss = _lbl("就绪", 12, C_SUB)
+        c.add_widget(self.ss)
 
-        content.add_widget(_lbl("扫描结果", 14, C_TAB_ACTIVE, True))
-        self.result_box = BoxLayout(orientation='vertical', size_hint_y=None, spacing=dp(4))
-        self.result_box.bind(minimum_height=self.result_box.setter('height'))
-        content.add_widget(self.result_box)
+        c.add_widget(_lbl("扫描结果", 14, C_TAB, True))
+        self.rb = BoxLayout(orientation='vertical', size_hint_y=None, spacing=dp(3))
+        self.rb.bind(minimum_height=self.rb.setter('height'))
+        c.add_widget(self.rb)
 
-        # bottom scan button
-        row3 = BoxLayout(size_hint_y=None, height=dp(44), spacing=dp(6))
-        self.scan_btn = _btn("开始扫描", C_BTN, 14, True)
-        self.scan_btn.bind(on_release=self._do_scan)
-        row3.add_widget(self.scan_btn)
-        row3.add_widget(_btn("保存配置到文件", (0.20, 0.20, 0.25, 1), 12))
-        content.add_widget(row3)
+        r3 = BoxLayout(size_hint_y=None, height=dp(44), spacing=dp(6))
+        self.scan_btn = _btn("开始扫描", C_BTN, 14, True, cb=self._do_scan)
+        r3.add_widget(self.scan_btn)
+        r3.add_widget(_btn("保存配置到文件", (0.20, 0.20, 0.25, 1), 12, cb=lambda x: self._popup("配置", "已保存" if self._save_cfg() else "失败")))
+        c.add_widget(r3)
 
-        scroll.add_widget(content)
-        page.add_widget(scroll)
-        self._scanner_page = page
+        sv.add_widget(c)
+        p.add_widget(sv)
+        return p
 
-    def _init_okx(self):
-        if not self.okx_client:
-            self.okx_client = OKXClient(
-                api_key=self.api_key_ti.text,
-                secret_key=self.secret_ti.text,
-                passphrase=self.phrase_ti.text,
-                testnet=True,
-                proxy_url=self.proxy_ti.text.strip() or None,
-            )
+    # ═══════════════════════ pool ═══════════════════════
+    def _pool(self):
+        p = BoxLayout(orientation='vertical', padding=dp(8), spacing=dp(4))
+        p.add_widget(_lbl("交易池", 14, C_TAB, True))
+        p.add_widget(_lbl("扫描通过的结果自动汇集到此", 11, C_SUB))
+        sv = ScrollView()
+        self.pc = BoxLayout(orientation='vertical', size_hint_y=None, spacing=dp(3))
+        self.pc.bind(minimum_height=self.pc.setter('height'))
+        self.pc.add_widget(_lbl("暂无数据", 12, C_SUB))
+        sv.add_widget(self.pc)
+        p.add_widget(sv)
+        bar = BoxLayout(size_hint_y=None, height=dp(40), spacing=dp(6))
+        bar.add_widget(_btn("导出扫描记录", (0.25, 0.40, 0.30, 1), 12, cb=lambda x: self._popup("导出", "功能开发中")))
+        bar.add_widget(_btn("清空记录", (0.30, 0.30, 0.35, 1), 12, cb=self._clear_pool))
+        p.add_widget(bar)
+        return p
+
+    # ═══════════════════════ monitor ═══════════════════════
+    def _monitor(self):
+        p = BoxLayout(orientation='vertical', padding=dp(8), spacing=dp(4))
+        p.add_widget(_lbl("监控池", 14, C_TAB, True))
+        p.add_widget(_lbl("添加交易对到监控列表", 11, C_SUB))
+        r = BoxLayout(size_hint_y=None, height=dp(40), spacing=dp(6))
+        self.mi = TextInput(hint_text="如 BTC-USDT-SWAP", multiline=False,
+                            font_size=sp(12), background_color=C_CARD, foreground_color=C_TEXT)
+        _font(self.mi)
+        r.add_widget(self.mi)
+        r.add_widget(_btn("添加", C_BTN, 12, cb=self._add_monitor))
+        p.add_widget(r)
+        sv = ScrollView()
+        self.mc = BoxLayout(orientation='vertical', size_hint_y=None, spacing=dp(3))
+        self.mc.bind(minimum_height=self.mc.setter('height'))
+        self.mc.add_widget(_lbl("暂无监控交易对", 12, C_SUB))
+        sv.add_widget(self.mc)
+        p.add_widget(sv)
+        bar = BoxLayout(size_hint_y=None, height=dp(40), spacing=dp(6))
+        bar.add_widget(_btn("开始监控", C_ACC, 12, cb=lambda x: self._popup("监控", "功能开发中")))
+        bar.add_widget(_btn("停止监控", C_RED, 12, cb=lambda x: self._popup("监控", "已停止")))
+        p.add_widget(bar)
+        return p
+
+    # ═══════════════════════ database ═══════════════════════
+    def _database(self):
+        p = BoxLayout(orientation='vertical', padding=dp(8), spacing=dp(4))
+        p.add_widget(_lbl("交易对数据库", 14, C_TAB, True))
+        p.add_widget(_lbl("下载历史K线数据", 11, C_SUB))
+        r = BoxLayout(size_hint_y=None, height=dp(40), spacing=dp(6))
+        self.dbi = TextInput(hint_text="如 BTC-USDT-SWAP", multiline=False,
+                             font_size=sp(12), background_color=C_CARD, foreground_color=C_TEXT)
+        _font(self.dbi)
+        r.add_widget(self.dbi)
+        r.add_widget(_btn("下载K线", C_BTN, 12, cb=lambda x: self._popup("数据库", "功能开发中")))
+        p.add_widget(r)
+        sv = ScrollView()
+        self.dc = BoxLayout(orientation='vertical', size_hint_y=None, spacing=dp(3))
+        self.dc.bind(minimum_height=self.dc.setter('height'))
+        self.dc.add_widget(_lbl("暂无数据", 12, C_SUB))
+        sv.add_widget(self.dc)
+        p.add_widget(sv)
+        bar = BoxLayout(size_hint_y=None, height=dp(40), spacing=dp(6))
+        bar.add_widget(_btn("刷新", (0.20, 0.20, 0.25, 1), 12, cb=lambda x: self._popup("数据库", "已刷新")))
+        bar.add_widget(_btn("清空", C_RED, 12, cb=lambda x: self._popup("数据库", "已清空")))
+        p.add_widget(bar)
+        return p
+
+    # ── scanner actions ──────────────────────────────────
+    def _test_conn(self, btn):
+        self._status("测试连接...")
+        threading.Thread(target=self._test_conn_thread, daemon=True).start()
+
+    def _test_conn_thread(self):
+        try:
+            client = OKXClient(api_key=self.api_ti.text, secret_key=self.sec_ti.text,
+                               passphrase=self.phr_ti.text, testnet=True,
+                               proxy_url=self.prx_ti.text.strip() or None)
+            res = client.get_tickers('SWAP')
+            if isinstance(res, dict) and res.get('code') == '0':
+                n = len(res.get('data', []))
+                Clock.schedule_once(lambda dt: self._popup("成功", f"获取 {n} 个交易对"))
+                Clock.schedule_once(lambda dt: self._status("API 连接正常"))
+            else:
+                msg = res.get('msg', '?') if isinstance(res, dict) else '网络错误'
+                Clock.schedule_once(lambda dt: self._popup("失败", msg))
+                Clock.schedule_once(lambda dt: self._status(f"连接失败: {msg}"))
+        except Exception as e:
+            Clock.schedule_once(lambda dt: self._popup("错误", str(e)))
+            Clock.schedule_once(lambda dt: self._status(f"错误: {e}"))
 
     def _do_scan(self, btn):
-        if self.is_scanning:
-            return
-        if not self.api_key_ti.text or not self.secret_ti.text:
-            self._popup("提示", "请先填写 API Key 和 Secret Key")
-            return
+        if self.is_scanning: return
+        if not self.api_ti.text or not self.sec_ti.text:
+            self._popup("提示", "请填写 API Key 和 Secret Key"); return
+        self._save_cfg()
         self.is_scanning = True
         self.scan_btn.disabled = True
         self.scan_btn.text = "扫描中..."
-        self.result_box.clear_widgets()
-        self.scan_progress.value = 0
-        self._status("正在连接 OKX...")
+        self.rb.clear_widgets()
+        self.pbar.value = 0
+        self._status("连接 OKX...")
         threading.Thread(target=self._scan_thread, daemon=True).start()
 
     def _scan_thread(self):
         try:
-            self._init_okx()
-            self._status("获取行情...")
-            self._set_progress(5)
+            if not self.okx_client:
+                self.okx_client = OKXClient(api_key=self.api_ti.text, secret_key=self.sec_ti.text,
+                                            passphrase=self.phr_ti.text, testnet=True,
+                                            proxy_url=self.prx_ti.text.strip() or None)
+            self._status("获取行情..."); self._set_progress(5)
             res = self.okx_client.get_tickers('SWAP')
             if not isinstance(res, dict) or res.get('code') != '0':
-                msg = res.get('msg', '网络错误') if isinstance(res, dict) else '连接失败'
-                self._show_err(f"API错误: {msg}")
-                return
+                msg = res.get('msg', '?') if isinstance(res, dict) else '连接失败'
+                self._err(f"API错误: {msg}"); return
             tickers = res.get('data', [])
             swaps = [t for t in tickers if t.get('instId', '').endswith('-USDT-SWAP')]
-            active = sorted(
-                [t for t in swaps if float(t.get('volCcyQuote') or t.get('vol24h') or 0) > 5000000],
-                key=lambda t: float(t.get('volCcyQuote') or t.get('vol24h') or 0), reverse=True
-            )[:30]
-            self._status(f"{len(active)} 个活跃品种, 开始分析...")
-            self._set_progress(10)
+            active = sorted([t for t in swaps if float(t.get('volCcyQuote') or t.get('vol24h') or 0) > 5000000],
+                            key=lambda t: float(t.get('volCcyQuote') or t.get('vol24h') or 0), reverse=True)[:30]
+            self._status(f"{len(active)} 个品种分析中..."); self._set_progress(10)
             found = 0
             for i, t in enumerate(active):
                 inst_id = t['instId']
@@ -285,170 +332,148 @@ class CryptoApp(App):
                         r = self.okx_client.get_kline(inst_id, bar=bar, limit=200)
                         if isinstance(r, dict) and r.get('code') == '0' and r.get('data'):
                             klines[bar] = r['data']
-                    if not klines.get('1D') or not klines.get('1H'):
-                        continue
-                    sym = ScannerSymbol(
-                        inst_id=inst_id,
-                        last_price=float(t.get('last', 0)),
-                        volume_24h=float(t.get('volCcyQuote') or t.get('vol24h') or 0),
-                        extra_data={'klines': klines},
-                    )
+                    if not klines.get('1D') or not klines.get('1H'): continue
+                    sym = ScannerSymbol(inst_id=inst_id,
+                                        last_price=float(t.get('last', 0)),
+                                        volume_24h=float(t.get('volCcyQuote') or t.get('vol24h') or 0),
+                                        extra_data={'klines': klines})
                     result = self.scanner.scan_symbol(sym)
                     if result.get('passed', False) or result.get('score', 0) >= 60:
                         found += 1
                         self._add_result(result)
+                        self.pool_results.append(result)
                 except Exception:
                     continue
                 time.sleep(0.15)
-            self._status(f"扫描完成！发现 {found} 个交易机会")
+            self._status(f"扫描完成！{found} 个机会")
             self._set_progress(100)
         except Exception as e:
-            self._show_err(f"扫描失败: {e}")
+            self._err(f"扫描失败: {e}")
         finally:
             self.is_scanning = False
-            Clock.schedule_once(lambda dt: self._reset_scan_btn())
+            Clock.schedule_once(lambda dt: self._reset_scan())
 
-    def _reset_scan_btn(self):
+    def _reset_scan(self):
         self.scan_btn.disabled = False
         self.scan_btn.text = "开始扫描"
 
     def _add_result(self, r):
         def _f(dt):
-            box = BoxLayout(orientation='vertical', size_hint_y=None, height=dp(60), spacing=dp(2))
-            with box.canvas.before:
+            bx = BoxLayout(orientation='vertical', size_hint_y=None, height=dp(56), spacing=dp(2))
+            with bx.canvas.before:
                 Color(*C_CARD)
-                box._bg = Rectangle(pos=box.pos, size=box.size)
-            box.bind(pos=lambda i, v: setattr(box._bg, 'pos', v),
-                     size=lambda i, v: setattr(box._bg, 'size', v))
+                bx._b = Rectangle(pos=bx.pos, size=bx.size)
+            bx.bind(pos=lambda i, v: setattr(bx._b, 'pos', v), size=lambda i, v: setattr(bx._b, 'size', v))
             d = r.get('direction', 'NEUTRAL')
             dc = C_ACC if d == 'LONG' else (C_RED if d == 'SHORT' else C_SUB)
-            hdr = BoxLayout(size_hint_y=None, height=dp(24))
-            hdr.add_widget(_lbl(r.get('symbol', '?'), 13, C_TEXT, True))
-            hdr.add_widget(_lbl(f"{d} {r.get('score', 0):.0f}分", 12, dc))
-            box.add_widget(hdr)
+            h = BoxLayout(size_hint_y=None, height=dp(24))
+            h.add_widget(_lbl(r.get('symbol', '?'), 12, C_TEXT, True))
+            h.add_widget(_lbl(f"{d} {r.get('score', 0):.0f}分", 12, dc))
+            bx.add_widget(h)
             sigs = ' | '.join(r.get('signals', [])[:3]) or '无信号'
-            box.add_widget(_lbl(sigs, 10, C_SUB))
-            self.result_box.add_widget(box)
+            bx.add_widget(_lbl(sigs, 10, C_SUB))
+            self.rb.add_widget(bx)
         Clock.schedule_once(_f)
 
-    # ═══════════════════════════════════════════════════════
-    # TAB 2: 交易池
-    # ═══════════════════════════════════════════════════════
-    def _build_trade_pool_page(self):
-        page = BoxLayout(orientation='vertical', padding=dp(8), spacing=dp(6))
-        page.add_widget(_lbl("交易池 - 扫描结果历史", 14, C_TAB_ACTIVE, True))
-        scroll = ScrollView()
-        self.pool_content = BoxLayout(orientation='vertical', size_hint_y=None, spacing=dp(4))
-        self.pool_content.bind(minimum_height=self.pool_content.setter('height'))
-        self.pool_content.add_widget(_lbl("暂无数据。扫描后会在此显示结果。", 12, C_SUB))
-        scroll.add_widget(self.pool_content)
-        page.add_widget(scroll)
-        bar = BoxLayout(size_hint_y=None, height=dp(40), spacing=dp(6))
-        bar.add_widget(_btn("导出扫描记录", (0.25, 0.40, 0.30, 1), 12))
-        bar.add_widget(_btn("清空记录", (0.30, 0.30, 0.35, 1), 12))
-        page.add_widget(bar)
-        self._pool_page = page
+    # ── monitor ──────────────────────────────────────────
+    def _add_monitor(self, btn):
+        s = self.mi.text.strip()
+        if not s: return
+        if s not in self.monitor_list:
+            self.monitor_list.append(s)
+            if len(self.mc.children) == 1 and isinstance(self.mc.children[0], Label):
+                self.mc.clear_widgets()
+            bx = BoxLayout(size_hint_y=None, height=dp(36), spacing=dp(6))
+            bx.add_widget(_lbl(s, 12, C_TEXT))
+            bx.add_widget(_btn("删除", C_RED, 10, cb=lambda x, sym=s: self._rm_monitor(sym)))
+            self.mc.add_widget(bx)
+            self.mi.text = ''
 
-    # ═══════════════════════════════════════════════════════
-    # TAB 3: 监控池
-    # ═══════════════════════════════════════════════════════
-    def _build_monitor_page(self):
-        page = BoxLayout(orientation='vertical', padding=dp(8), spacing=dp(6))
-        page.add_widget(_lbl("监控池 - 实时信号监控", 14, C_TAB_ACTIVE, True))
-        page.add_widget(_lbl("添加交易对到监控列表，自动检测趋势信号", 11, C_SUB))
-        row = BoxLayout(size_hint_y=None, height=dp(40), spacing=dp(6))
-        self.monitor_input = _input("输入交易对 如 BTC-USDT-SWAP")
-        self.monitor_input.size_hint_x = 0.6
-        row.add_widget(self.monitor_input)
-        row.add_widget(_btn("添加", C_BTN, 12))
-        page.add_widget(row)
-        scroll = ScrollView()
-        self.monitor_content = BoxLayout(orientation='vertical', size_hint_y=None, spacing=dp(4))
-        self.monitor_content.bind(minimum_height=self.monitor_content.setter('height'))
-        self.monitor_content.add_widget(_lbl("暂无监控交易对", 12, C_SUB))
-        scroll.add_widget(self.monitor_content)
-        page.add_widget(scroll)
-        bar = BoxLayout(size_hint_y=None, height=dp(40), spacing=dp(6))
-        bar.add_widget(_btn("开始监控", C_ACC, 12))
-        bar.add_widget(_btn("停止监控", C_RED, 12))
-        page.add_widget(bar)
-        self._monitor_page = page
+    def _rm_monitor(self, s):
+        if s in self.monitor_list:
+            self.monitor_list.remove(s)
+        self.mc.clear_widgets()
+        for sym in self.monitor_list:
+            bx = BoxLayout(size_hint_y=None, height=dp(36), spacing=dp(6))
+            bx.add_widget(_lbl(sym, 12, C_TEXT))
+            bx.add_widget(_btn("删除", C_RED, 10, cb=lambda x, m=sym: self._rm_monitor(m)))
+            self.mc.add_widget(bx)
+        if not self.monitor_list:
+            self.mc.add_widget(_lbl("暂无监控交易对", 12, C_SUB))
 
-    # ═══════════════════════════════════════════════════════
-    # TAB 4: 交易对数据库
-    # ═══════════════════════════════════════════════════════
-    def _build_database_page(self):
-        page = BoxLayout(orientation='vertical', padding=dp(8), spacing=dp(6))
-        page.add_widget(_lbl("交易对数据库 - K线数据管理", 14, C_TAB_ACTIVE, True))
-        page.add_widget(_lbl("下载并管理交易对历史K线数据", 11, C_SUB))
-        row = BoxLayout(size_hint_y=None, height=dp(40), spacing=dp(6))
-        self.db_input = _input("交易对 如 BTC-USDT-SWAP")
-        self.db_input.size_hint_x = 0.5
-        row.add_widget(self.db_input)
-        row.add_widget(_btn("下载K线", C_BTN, 12))
-        page.add_widget(row)
-        scroll = ScrollView()
-        self.db_content = BoxLayout(orientation='vertical', size_hint_y=None, spacing=dp(4))
-        self.db_content.bind(minimum_height=self.db_content.setter('height'))
-        self.db_content.add_widget(_lbl("暂无下载数据", 12, C_SUB))
-        scroll.add_widget(self.db_content)
-        page.add_widget(scroll)
-        bar = BoxLayout(size_hint_y=None, height=dp(40), spacing=dp(6))
-        bar.add_widget(_btn("刷新列表", (0.20, 0.20, 0.25, 1), 12))
-        bar.add_widget(_btn("清空数据", C_RED, 12))
-        page.add_widget(bar)
-        self._db_page = page
+    # ── pool ─────────────────────────────────────────────
+    def _clear_pool(self, btn):
+        self.pool_results = []
+        self.pc.clear_widgets()
+        self.pc.add_widget(_lbl("已清空", 12, C_SUB))
+
+    # ── auto scan ────────────────────────────────────────
+    def _toggle_auto(self, btn):
+        if hasattr(self, '_auto_timer') and self._auto_timer:
+            self._auto_timer.cancel()
+            self._auto_timer = None
+            self.auto_btn.text = "开启定时"
+            self.auto_btn.background_color = (0.45, 0.35, 0.25, 1)
+            self._status("定时已停止")
+        else:
+            try:
+                sec = int(self.tmr_ti.text)
+                if sec < 60: sec = 60
+            except ValueError:
+                sec = 600
+            self.auto_btn.text = "停止定时"
+            self.auto_btn.background_color = C_RED
+            self._status(f"定时 {sec}秒 已开启")
+            self._auto_timer = Clock.schedule_interval(lambda dt: self._do_scan(None), sec)
 
     # ── helpers ──────────────────────────────────────────
     def _status(self, msg):
-        Clock.schedule_once(lambda dt: setattr(self.status_lbl, 'text', msg))
-        Clock.schedule_once(lambda dt: setattr(self.scan_status, 'text', msg))
+        Clock.schedule_once(lambda dt: setattr(self.slbl, 'text', msg))
+        Clock.schedule_once(lambda dt: setattr(self.ss, 'text', msg))
 
     def _set_progress(self, v):
-        Clock.schedule_once(lambda dt: setattr(self.scan_progress, 'value', v))
+        Clock.schedule_once(lambda dt: setattr(self.pbar, 'value', v))
 
-    def _show_err(self, msg):
-        def _f(dt):
-            self._popup("错误", msg)
-            self._status(msg)
+    def _err(self, msg):
+        def _f(dt): self._popup("错误", msg); self._status(msg)
         Clock.schedule_once(_f)
 
     def _popup(self, title, text):
-        content = BoxLayout(orientation='vertical', padding=dp(10), spacing=dp(8))
-        lbl = Label(text=text, font_size=sp(12), halign='left', valign='top', color=C_TEXT)
-        _font(lbl)
-        lbl.bind(size=lbl.setter('text_size'))
-        content.add_widget(lbl)
-        btn = Button(text="关闭", size_hint_y=None, height=dp(36),
-                     background_color=C_CARD, color=C_TEXT)
-        _font(btn)
-        content.add_widget(btn)
-        popup = Popup(title=title, content=content, size_hint=(0.9, 0.6),
-                      background_color=(0.15, 0.15, 0.18, 0.95),
-                      separator_color=C_TAB_ACTIVE)
-        btn.bind(on_release=popup.dismiss)
-        popup.open()
+        c = BoxLayout(orientation='vertical', padding=dp(12), spacing=dp(8))
+        l = Label(text=text, font_size=sp(13), halign='left', valign='top', color=C_TEXT)
+        _font(l); l.bind(size=l.setter('text_size'))
+        c.add_widget(l)
+        b = Button(text="关闭", size_hint_y=None, height=dp(36),
+                   background_color=C_BTN, color=C_TEXT); _font(b)
+        c.add_widget(b)
+        pp = Popup(title=title, content=c, size_hint=(0.85, 0.5),
+                   background_color=(0.15, 0.15, 0.18, 0.95), separator_color=C_TAB)
+        b.bind(on_release=pp.dismiss)
+        pp.open()
 
     def _load_cfg(self):
         try:
-            if os.path.exists(self.config_file):
-                with open(self.config_file, 'r', encoding='utf-8') as f:
+            if os.path.exists(self.cfg_file):
+                with open(self.cfg_file, 'r', encoding='utf-8') as f:
                     return json.load(f)
-        except Exception:
-            pass
+        except Exception: pass
         return {}
 
     def _save_cfg(self):
-        cfg = {'proxy_url': self.proxy_ti.text, 'auto_scan_interval': self.timer_ti.text}
+        cfg = {'proxy_url': self.prx_ti.text, 'auto_scan_interval': self.tmr_ti.text}
         try:
-            os.makedirs(os.path.dirname(self.config_file), exist_ok=True)
-            with open(self.config_file, 'w', encoding='utf-8') as f:
+            os.makedirs(os.path.dirname(self.cfg_file), exist_ok=True)
+            with open(self.cfg_file, 'w', encoding='utf-8') as f:
                 json.dump(cfg, f, ensure_ascii=False, indent=2)
             return True
-        except Exception:
-            return False
+        except Exception: return False
 
-    def on_pause(self): return True
+    def on_pause(self):
+        if hasattr(self, '_auto_timer') and self._auto_timer:
+            self._auto_timer.cancel()
+            self._auto_timer = None
+        return True
+
     def on_resume(self): pass
 
 
@@ -456,23 +481,15 @@ if __name__ == '__main__':
     if not _IMPORTS_OK:
         class ErrApp(App):
             def build(self):
-                from kivy.uix.boxlayout import BoxLayout
-                from kivy.uix.label import Label
-                from kivy.uix.button import Button
-                from kivy.uix.scrollview import ScrollView
-                Window.size = (360, 748)
-                root = BoxLayout(orientation='vertical', padding=dp(20), spacing=dp(10))
-                lbl = Label(text=f"启动失败\n\n{_IMPORT_ERR}\n\n查看 /sdcard/cs_crash.log",
-                           font_size=sp(12), color=C_RED, halign='left', valign='top')
-                lbl.bind(size=lbl.setter('text_size'))
-                scr = ScrollView()
-                scr.add_widget(lbl)
-                root.add_widget(scr)
-                btn = Button(text="退出", size_hint_y=None, height=dp(40),
+                r = BoxLayout(orientation='vertical', padding=dp(20), spacing=dp(10))
+                l = Label(text=f"启动失败\n\n{_IMPORT_ERR}\n\n/sdcard/cs_crash.log",
+                          font_size=sp(12), color=C_RED, halign='left', valign='top')
+                l.bind(size=l.setter('text_size'))
+                s = ScrollView(); s.add_widget(l); r.add_widget(s)
+                b = Button(text="退出", size_hint_y=None, height=dp(40),
                            background_color=C_RED, color=C_TEXT)
-                btn.bind(on_release=lambda x: sys.exit(0))
-                root.add_widget(btn)
-                return root
+                b.bind(on_release=lambda x: sys.exit(0)); r.add_widget(b)
+                return r
         ErrApp().run()
     else:
         CryptoApp().run()
