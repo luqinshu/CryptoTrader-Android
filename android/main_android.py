@@ -49,7 +49,7 @@ try:
     from src.scanner.base_scanner import ScannerSymbol
     _log("ScannerSymbol import OK")
 
-    from strategies.OKX小时线波段共振策略 import OKXHourSwingScanner
+    from strategies.okx_swing import OKXHourSwingScanner
     _log("OKXHourSwingScanner import OK")
 
     _imports_ok = True
@@ -345,13 +345,26 @@ class CryptoScannerApp(App):
             py_files = glob.glob(os.path.join(strategies_dir, '*.py'))
             for f in py_files:
                 name = os.path.basename(f)
-                if not name.startswith('_') and name != '__init__.py':
-                    self.available_strategies.append(name.replace('.py', ''))
+                if not name.startswith('_') and name != '__init__.py' and name != 'okx_swing.py':
+                    display_name = name.replace('.py', '')
+                    self.available_strategies.append(display_name)
         except Exception:
             pass
         if not self.available_strategies:
             self.available_strategies = ['OKX小时线波段共振策略']
         return self.available_strategies
+
+    def _import_strategy(self, strategy_name):
+        import importlib.util
+        # Map known strategies to their files
+        filename = strategy_name + '.py'
+        filepath = os.path.join(self._data_dir, 'strategies', filename)
+        if os.path.exists(filepath):
+            spec = importlib.util.spec_from_file_location(strategy_name, filepath)
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            return mod
+        raise ImportError(f"Strategy file not found: {filepath}")
 
     def _load_config(self):
         cfg = {}
@@ -434,8 +447,7 @@ class CryptoScannerApp(App):
             return
         
         try:
-            module_name = f"strategies.{strategy_name}"
-            module = __import__(module_name, fromlist=['*'])
+            module = self._import_strategy(strategy_name)
             
             scanner_class = None
             possible_class_names = [
