@@ -73,13 +73,13 @@ C_TAB_OFF = (0.12, 0.12, 0.16, 1)
 def _font(w):
     if FONT_NAME: w.font_name = FONT_NAME
 
-def _lbl(text, s=13, c=C_TEXT, b=False, h='left'):
+def _lbl(text, s=15, c=C_TEXT, b=False, h='left'):
     l = Label(text=text, font_size=sp(s), color=c, bold=b, halign=h, valign='middle')
     l.bind(size=l.setter('text_size'))
     _font(l)
     return l
 
-def _btn(text, bg=C_BTN, s=13, b=False, cb=None):
+def _btn(text, bg=C_BTN, s=14, b=False, cb=None):
     btn = Button(text=text, font_size=sp(s), bold=b, background_color=bg, color=C_TEXT, background_normal='')
     _font(btn)
     if cb: btn.bind(on_release=cb)
@@ -87,8 +87,8 @@ def _btn(text, bg=C_BTN, s=13, b=False, cb=None):
 
 def _in(hint='', text='', pw=False):
     t = TextInput(hint_text=hint, text=text, password=pw, multiline=False,
-                  font_size=sp(13), background_color=C_CARD, foreground_color=C_TEXT,
-                  cursor_color=C_TAB, padding=[dp(8), dp(8)])
+                  font_size=sp(14), background_color=C_CARD, foreground_color=C_TEXT,
+                  cursor_color=C_TAB, padding=[dp(12), dp(12)])
     _font(t)
     return t
 
@@ -109,21 +109,21 @@ class CryptoApp(App):
         root = BoxLayout(orientation='vertical')
 
         # title
-        tb = BoxLayout(size_hint_y=None, height=dp(44))
+        tb = BoxLayout(size_hint_y=None, height=dp(52))
         with tb.canvas.before:
             Color(*C_TAB_OFF)
             self._tbbg = Rectangle(pos=tb.pos, size=tb.size)
         tb.bind(pos=lambda i, v: setattr(self._tbbg, 'pos', v),
                 size=lambda i, v: setattr(self._tbbg, 'size', v))
-        tb.add_widget(_lbl("CryptoScanner Pro", 18, C_TAB, True))
+        tb.add_widget(_lbl("CryptoScanner Pro", 20, C_TAB, True))
         root.add_widget(tb)
 
         # tabs
         self.tabs = ['交易对扫描', '交易池', '监控池', '数据库']
         self.tab_btns = []
-        tr = BoxLayout(size_hint_y=None, height=dp(40), spacing=dp(2))
+        tr = BoxLayout(size_hint_y=None, height=dp(48), spacing=dp(2))
         for i, n in enumerate(self.tabs):
-            b = Button(text=n, font_size=sp(13), color=C_TEXT,
+            b = Button(text=n, font_size=sp(14), color=C_TEXT,
                        background_color=C_TAB if i == 0 else C_TAB_OFF,
                        background_normal='')
             b.tab_idx = i
@@ -152,51 +152,56 @@ class CryptoApp(App):
 
     # ═══════════════════════ scanner ═══════════════════════
     def _scanner(self):
-        p = BoxLayout(orientation='vertical', padding=dp(8), spacing=dp(4))
+        p = BoxLayout(orientation='vertical', padding=dp(10), spacing=dp(8))
         sv = ScrollView()
-        c = BoxLayout(orientation='vertical', size_hint_y=None, spacing=dp(4))
+        c = BoxLayout(orientation='vertical', size_hint_y=None, spacing=dp(8))
         c.bind(minimum_height=c.setter('height'))
 
-        c.add_widget(_lbl("API 配置", 14, C_TAB, True))
+        c.add_widget(_lbl("API 配置", 16, C_TAB, True))
         self.api_ti = _in("OKX API Key")
         self.sec_ti = _in("Secret Key", pw=True)
         self.phr_ti = _in("Passphrase", pw=True)
         self.prx_ti = _in("代理(可选)", self._cfg.get('proxy_url', ''))
+        for ti in [self.api_ti, self.sec_ti, self.phr_ti, self.prx_ti]:
+            ti.size_hint_y = None
+            ti.height = dp(52)
         c.add_widget(self.api_ti)
         c.add_widget(self.sec_ti)
         c.add_widget(self.phr_ti)
         c.add_widget(self.prx_ti)
 
-        c.add_widget(_lbl("策略", 14, C_TAB, True))
-        c.add_widget(_lbl("当前: OKX小时线波段共振策略", 12, C_SUB))
+        c.add_widget(_lbl("策略", 16, C_TAB, True))
+        c.add_widget(_lbl("当前: OKX小时线波段共振策略", 13, C_SUB))
 
-        r1 = BoxLayout(size_hint_y=None, height=dp(40), spacing=dp(6))
-        r1.add_widget(_btn("测试连接", (0.40, 0.40, 0.25, 1), 12, cb=self._test_conn))
-        r1.add_widget(_btn("保存配置", (0.20, 0.20, 0.25, 1), 12, cb=lambda x: self._popup("配置", "已保存" if self._save_cfg() else "失败")))
+        r1 = BoxLayout(size_hint_y=None, height=dp(56), spacing=dp(8))
+        r1.add_widget(_btn("测试连接", (0.40, 0.40, 0.25, 1), 14, cb=self._test_conn))
+        r1.add_widget(_btn("保存配置", (0.20, 0.20, 0.25, 1), 14, cb=lambda x: self._popup("配置", "已保存" if self._save_cfg() else "失败")))
         c.add_widget(r1)
 
-        c.add_widget(_lbl("定时扫描", 14, C_TAB, True))
-        self.tmr_ti = _in("间隔(秒)", self._cfg.get('auto_scan_interval', '600'))
-        r2 = BoxLayout(size_hint_y=None, height=dp(40), spacing=dp(6))
+        c.add_widget(_lbl("定时扫描(秒)", 16, C_TAB, True))
+        self.tmr_ti = _in("600", self._cfg.get('auto_scan_interval', '600'))
+        self.tmr_ti.size_hint_y = None
+        self.tmr_ti.height = dp(52)
+        r2 = BoxLayout(size_hint_y=None, height=dp(56), spacing=dp(8))
         r2.add_widget(self.tmr_ti)
-        self.auto_btn = _btn("开启定时", (0.45, 0.35, 0.25, 1), 12, cb=self._toggle_auto)
+        self.auto_btn = _btn("开启定时", (0.45, 0.35, 0.25, 1), 14, cb=self._toggle_auto)
         r2.add_widget(self.auto_btn)
         c.add_widget(r2)
 
-        self.pbar = ProgressBar(value=0, size_hint_y=None, height=dp(14))
+        self.pbar = ProgressBar(value=0, size_hint_y=None, height=dp(20))
         c.add_widget(self.pbar)
-        self.ss = _lbl("就绪", 12, C_SUB)
+        self.ss = _lbl("就绪：配置 API 后点击扫描", 13, C_SUB)
         c.add_widget(self.ss)
 
-        c.add_widget(_lbl("扫描结果", 14, C_TAB, True))
-        self.rb = BoxLayout(orientation='vertical', size_hint_y=None, spacing=dp(3))
+        c.add_widget(_lbl("扫描结果", 16, C_TAB, True))
+        self.rb = BoxLayout(orientation='vertical', size_hint_y=None, spacing=dp(4))
         self.rb.bind(minimum_height=self.rb.setter('height'))
         c.add_widget(self.rb)
 
-        r3 = BoxLayout(size_hint_y=None, height=dp(44), spacing=dp(6))
-        self.scan_btn = _btn("开始扫描", C_BTN, 14, True, cb=self._do_scan)
+        r3 = BoxLayout(size_hint_y=None, height=dp(56), spacing=dp(8))
+        self.scan_btn = _btn("开始扫描", C_BTN, 16, True, cb=self._do_scan)
         r3.add_widget(self.scan_btn)
-        r3.add_widget(_btn("保存配置到文件", (0.20, 0.20, 0.25, 1), 12, cb=lambda x: self._popup("配置", "已保存" if self._save_cfg() else "失败")))
+        r3.add_widget(_btn("保存配置到文件", (0.20, 0.20, 0.25, 1), 14, cb=lambda x: self._popup("配置", "已保存" if self._save_cfg() else "失败")))
         c.add_widget(r3)
 
         sv.add_widget(c)
