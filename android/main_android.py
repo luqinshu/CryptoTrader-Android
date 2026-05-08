@@ -340,14 +340,22 @@ class CryptoScannerApp(App):
 
     def _load_strategies(self):
         strategies_dir = os.path.join(self._data_dir, 'strategies')
+        self._strategy_map = {
+            'okx_hour_strategy': 'OKX小时线波段共振策略',
+            'xiaoyue_boll': '小月期货多周期布林趋势转折',
+            'three_min_pullback': '三分钟多周期回调企稳策略',
+            'trend_squeeze': '趋势挤压突破前4_30_v2',
+            'AI截面五引擎组合扫描器4_28_v2': 'AI截面五引擎组合扫描器4_28_v2',
+        }
         self.available_strategies = []
         try:
             py_files = glob.glob(os.path.join(strategies_dir, '*.py'))
             for f in py_files:
                 name = os.path.basename(f)
                 if not name.startswith('_') and name != '__init__.py' and name != 'okx_swing.py':
-                    display_name = name.replace('.py', '')
-                    self.available_strategies.append(display_name)
+                    module_key = name.replace('.py', '')
+                    display = self._strategy_map.get(module_key, module_key)
+                    self.available_strategies.append(display)
         except Exception:
             pass
         if not self.available_strategies:
@@ -355,12 +363,14 @@ class CryptoScannerApp(App):
         return self.available_strategies
 
     def _import_strategy(self, strategy_name):
-        import importlib.util
-        # Map known strategies to their files
-        filename = strategy_name + '.py'
+        # Reverse lookup to get module filename
+        reverse_map = {v: k for k, v in self._strategy_map.items()}
+        module_key = reverse_map.get(strategy_name, strategy_name)
+        filename = module_key + '.py'
         filepath = os.path.join(self._data_dir, 'strategies', filename)
         if os.path.exists(filepath):
-            spec = importlib.util.spec_from_file_location(strategy_name, filepath)
+            import importlib.util
+            spec = importlib.util.spec_from_file_location(module_key, filepath)
             mod = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(mod)
             return mod
