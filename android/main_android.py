@@ -1,35 +1,64 @@
 """
 CryptoScanner Pro - Android MVP
-纯 Kivy 加密货币扫描器（兼容 Kivy 2.3 + Python 3.12）
-华为 P20 屏幕适配：1080×2244 像素，18.7:9 宽高比
+Kivy 加密货币扫描器
 """
 
 import os
 import sys
-import json
-import threading
-import time
-import glob
+import traceback
+
+# Write crash log for adb logcat debugging
+def _log(msg):
+    try:
+        with open('/sdcard/cryptoscanner_crash.log', 'a') as f:
+            f.write(msg + '\n')
+    except Exception:
+        pass
+
+_log("CryptoScanner starting...")
+_log(f"Python {sys.version}")
+_log(f"sys.path: {sys.path}")
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from kivy.app import App
-from kivy.uix.boxlayout import BoxLayout
-from kivy.uix.button import Button
-from kivy.uix.label import Label
-from kivy.uix.textinput import TextInput
-from kivy.uix.scrollview import ScrollView
-from kivy.uix.progressbar import ProgressBar
-from kivy.uix.popup import Popup
-from kivy.uix.spinner import Spinner
-from kivy.clock import Clock
-from kivy.metrics import dp, sp
-from kivy.core.window import Window
-from kivy.graphics import Color, Rectangle
+try:
+    import json
+    import threading
+    import time
+    import glob
 
-from src.api.okx_client import OKXClient
-from src.scanner.base_scanner import ScannerSymbol
-from strategies.OKX小时线波段共振策略 import OKXHourSwingScanner
+    from kivy.app import App
+    from kivy.uix.boxlayout import BoxLayout
+    from kivy.uix.button import Button
+    from kivy.uix.label import Label
+    from kivy.uix.textinput import TextInput
+    from kivy.uix.scrollview import ScrollView
+    from kivy.uix.progressbar import ProgressBar
+    from kivy.uix.popup import Popup
+    from kivy.uix.spinner import Spinner
+    from kivy.clock import Clock
+    from kivy.metrics import dp, sp
+    from kivy.core.window import Window
+    from kivy.graphics import Color, Rectangle
+
+    _log("Kivy imports OK")
+
+    from src.api.okx_client import OKXClient
+    _log("OKXClient import OK")
+
+    from src.scanner.base_scanner import ScannerSymbol
+    _log("ScannerSymbol import OK")
+
+    from strategies.OKX小时线波段共振策略 import OKXHourSwingScanner
+    _log("OKXHourSwingScanner import OK")
+
+    _imports_ok = True
+except Exception as e:
+    _log(f"IMPORT ERROR: {e}")
+    _log(traceback.format_exc())
+    _imports_ok = False
+    _import_error = str(e)
+    _import_traceback = traceback.format_exc()
 
 P20_WIDTH = 360
 P20_HEIGHT = 748
@@ -679,4 +708,34 @@ class CryptoScannerApp(App):
 
 
 if __name__ == "__main__":
-    CryptoScannerApp().run()
+    if not _imports_ok:
+        from kivy.app import App
+        from kivy.uix.label import Label
+        from kivy.uix.boxlayout import BoxLayout
+        from kivy.uix.button import Button
+        from kivy.uix.scrollview import ScrollView
+        from kivy.uix.popup import Popup
+        from kivy.metrics import dp, sp
+        from kivy.core.window import Window
+
+        class ErrorApp(App):
+            def build(self):
+                Window.size = (360, 748)
+                root = BoxLayout(orientation='vertical', padding=dp(20), spacing=dp(10))
+                lbl = Label(
+                    text=f"启动失败\n\n{_import_error}\n\n请检查 /sdcard/cryptoscanner_crash.log",
+                    font_size=sp(12), color=(1, 0.3, 0.3, 1), halign='left', valign='top'
+                )
+                lbl.bind(size=lbl.setter('text_size'))
+                scroll = ScrollView()
+                scroll.add_widget(lbl)
+                root.add_widget(scroll)
+                btn = Button(text="退出", size_hint_y=None, height=dp(40),
+                           background_color=(0.6, 0.2, 0.2, 1))
+                btn.bind(on_release=lambda x: sys.exit(0))
+                root.add_widget(btn)
+                return root
+
+        ErrorApp().run()
+    else:
+        CryptoScannerApp().run()
