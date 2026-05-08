@@ -3,8 +3,8 @@ title = CryptoScanner Pro
 package.name = cryptoscanner
 package.domain = org.cryptotrader
 source.dir = .
-source.include_exts = py,png,jpg,kv,atlas,json,ttf,ttc,ini,gif
-source.exclude_dirs = tests,venv,venv313,.git,__pycache__,.claude,.venv,.buildozer,node_modules,reports,data,.pytest_cache,.github,screenshots
+source.include_exts = py,png,jpg,kv,atlas,json,ttf,ttc,ini,gif,csv,txt
+source.exclude_dirs = tests,venv,venv313,.git,__pycache__,.claude,.venv,.buildozer,node_modules,reports,data,.pytest_cache,.github,screenshots,ui,telegram_bot,ai_agent,rl_optimizer,backtest,__pycache__
 
 version = 1.0.0
 
