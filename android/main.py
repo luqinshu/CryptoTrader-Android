@@ -294,7 +294,7 @@ class CryptoApp(App):
     def _test_conn_thread(self):
         try:
             client = OKXClient(api_key=self.api_ti.text, secret_key=self.sec_ti.text,
-                               passphrase=self.phr_ti.text, testnet=True,
+                               passphrase=self.phr_ti.text, testnet=False,
                                proxy_url=self.prx_ti.text.strip() or None)
             res = client.get_tickers('SWAP')
             if isinstance(res, dict) and res.get('code') == '0':
@@ -326,7 +326,7 @@ class CryptoApp(App):
         try:
             if not self.okx_client:
                 self.okx_client = OKXClient(api_key=self.api_ti.text, secret_key=self.sec_ti.text,
-                                            passphrase=self.phr_ti.text, testnet=True,
+                                            passphrase=self.phr_ti.text, testnet=False,
                                             proxy_url=self.prx_ti.text.strip() or None)
             self._status("获取行情..."); self._set_progress(5)
             res = self.okx_client.get_tickers('SWAP')
