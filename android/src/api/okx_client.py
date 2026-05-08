@@ -172,6 +172,7 @@ class OKXClient:
     def _direct_session(self):
         session = requests.Session()
         session.trust_env = False
+        session.verify = False
         return session
 
     def _request_get(self, url: str, params: Dict = None, headers: Dict = None):

@@ -2,9 +2,33 @@
 CryptoScanner Pro - Android Full Version
 Kivy multi-tab trading platform
 """
-import os, sys, json, threading, time, glob, traceback, importlib.util
+import os, sys, json, threading, time, glob, traceback, importlib.util, warnings
+warnings.filterwarnings('ignore')
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+# ── clipboard helper ──────────────────────────────────────
+def _get_clipboard():
+    """Get text from Android clipboard via pyjnius"""
+    try:
+        from jnius import autoclass
+        PythonActivity = autoclass('org.kivy.android.PythonActivity')
+        Context = autoclass('android.content.Context')
+        activity = PythonActivity.mActivity
+        clipboard = activity.getSystemService(Context.CLIPBOARD_SERVICE)
+        if clipboard.hasPrimaryClip():
+            clip = clipboard.getPrimaryClip()
+            if clip.getItemCount() > 0:
+                return clip.getItemAt(0).getText().toString()
+    except Exception:
+        pass
+    return ''
+
+def _paste_to(ti):
+    """Paste clipboard into text input"""
+    text = _get_clipboard()
+    if text:
+        ti.text = text
 
 def _crash(msg):
     try:
@@ -161,13 +185,24 @@ class CryptoApp(App):
         cfg_section.bind(minimum_height=cfg_section.setter('height'))
 
         cfg_section.add_widget(_lbl("API 配置", 16, C_TAB, True))
+
+        def _paste_row(input_widget):
+            r = BoxLayout(size_hint_y=None, height=dp(48), spacing=dp(6))
+            ti = input_widget
+            ti.size_hint_x = 0.75
+            r.add_widget(ti)
+            pb = _btn("粘贴", (0.25, 0.25, 0.35, 1), 12, cb=lambda x: _paste_to(ti))
+            pb.size_hint_x = 0.25
+            r.add_widget(pb)
+            return r
+
         self.api_ti = _in("OKX API Key")
         self.sec_ti = _in("Secret Key", pw=True)
         self.phr_ti = _in("Passphrase", pw=True)
         self.prx_ti = _in("代理(可选)", self._cfg.get('proxy_url', ''))
-        cfg_section.add_widget(self.api_ti)
-        cfg_section.add_widget(self.sec_ti)
-        cfg_section.add_widget(self.phr_ti)
+        cfg_section.add_widget(_paste_row(self.api_ti))
+        cfg_section.add_widget(_paste_row(self.sec_ti))
+        cfg_section.add_widget(_paste_row(self.phr_ti))
         cfg_section.add_widget(self.prx_ti)
 
         cfg_section.add_widget(_lbl("策略: OKX小时线波段共振策略", 13, C_SUB))
