@@ -16,6 +16,8 @@ import base64
 import requests
 from requests.exceptions import ConnectionError, ProxyError
 from typing import Dict, List, Optional
+import urllib3
+urllib3.disable_warnings()
 
 from src.api.rate_limiter import api_rate_limiter
 
@@ -179,7 +181,7 @@ class OKXClient:
         try:
             proxies = self._active_proxies()
             if proxies:
-                return requests.get(url, params=params, headers=headers, proxies=proxies, timeout=10)
+                return requests.get(url, params=params, headers=headers, proxies=proxies, timeout=10, verify=False)
             with self._direct_session() as session:
                 return session.get(url, params=params, headers=headers, timeout=10)
         except (ProxyError, ConnectionError) as exc:
@@ -191,7 +193,7 @@ class OKXClient:
         try:
             proxies = self._active_proxies()
             if proxies:
-                return requests.post(url, json=data, headers=headers, proxies=proxies, timeout=10)
+                return requests.post(url, json=data, headers=headers, proxies=proxies, timeout=10, verify=False)
             with self._direct_session() as session:
                 return session.post(url, json=data, headers=headers, timeout=10)
         except (ProxyError, ConnectionError) as exc:

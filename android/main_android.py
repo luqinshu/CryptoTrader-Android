@@ -458,8 +458,11 @@ class CryptoApp(App):
 
     def _popup(self, title, text):
         c = BoxLayout(orientation='vertical', padding=dp(12), spacing=dp(8))
-        l = Label(text=text, font_size=sp(13), halign='left', valign='top', color=C_TEXT)
-        _font(l); l.bind(size=l.setter('text_size'))
+        from kivy.uix.textinput import TextInput
+        l = TextInput(text=text, font_size=sp(13), readonly=True,
+                      background_color=(0,0,0,0), foreground_color=C_TEXT,
+                      size_hint_y=1)
+        _font(l)
         c.add_widget(l)
         b = Button(text="关闭", size_hint_y=None, height=dp(36),
                    background_color=C_BTN, color=C_TEXT); _font(b)
