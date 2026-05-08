@@ -96,8 +96,9 @@ def _in(hint='', text='', pw=False):
 
 class CryptoApp(App):
     def build(self):
-        # Let Kivy manage size on Android
         Window.minimum_width, Window.minimum_height = 320, 480
+        Window.softinput_mode = 'below_target'
+
         self._data_dir = os.path.dirname(os.path.abspath(__file__))
         self.cfg_file = os.path.join(self._data_dir, "scanner_config.json")
         self._cfg = self._load_cfg()
@@ -154,29 +155,29 @@ class CryptoApp(App):
     # ═══════════════════════ scanner ═══════════════════════
     def _scanner(self):
         p = BoxLayout(orientation='vertical', padding=dp(10), spacing=dp(8))
-        sv = ScrollView()
-        c = BoxLayout(orientation='vertical', size_hint_y=None, spacing=dp(8))
-        c.bind(minimum_height=c.setter('height'))
 
-        c.add_widget(_lbl("API 配置", 16, C_TAB, True))
+        # Fixed API config section (not scrollable)
+        cfg_section = BoxLayout(orientation='vertical', size_hint_y=None, spacing=dp(6))
+        cfg_section.bind(minimum_height=cfg_section.setter('height'))
+
+        cfg_section.add_widget(_lbl("API 配置", 16, C_TAB, True))
         self.api_ti = _in("OKX API Key")
         self.sec_ti = _in("Secret Key", pw=True)
         self.phr_ti = _in("Passphrase", pw=True)
         self.prx_ti = _in("代理(可选)", self._cfg.get('proxy_url', ''))
-        c.add_widget(self.api_ti)
-        c.add_widget(self.sec_ti)
-        c.add_widget(self.phr_ti)
-        c.add_widget(self.prx_ti)
+        cfg_section.add_widget(self.api_ti)
+        cfg_section.add_widget(self.sec_ti)
+        cfg_section.add_widget(self.phr_ti)
+        cfg_section.add_widget(self.prx_ti)
 
-        c.add_widget(_lbl("策略", 16, C_TAB, True))
-        c.add_widget(_lbl("当前: OKX小时线波段共振策略", 13, C_SUB))
+        cfg_section.add_widget(_lbl("策略: OKX小时线波段共振策略", 13, C_SUB))
 
         r1 = BoxLayout(size_hint_y=None, height=dp(56), spacing=dp(8))
         r1.add_widget(_btn("测试连接", (0.40, 0.40, 0.25, 1), 14, cb=self._test_conn))
         r1.add_widget(_btn("保存配置", (0.20, 0.20, 0.25, 1), 14, cb=lambda x: self._popup("配置", "已保存" if self._save_cfg() else "失败")))
-        c.add_widget(r1)
+        cfg_section.add_widget(r1)
 
-        c.add_widget(_lbl("定时扫描(秒)", 16, C_TAB, True))
+        cfg_section.add_widget(_lbl("定时扫描(秒)", 16, C_TAB, True))
         self.tmr_ti = TextInput(text=self._cfg.get('auto_scan_interval', '600'),
                                 hint_text="600", multiline=False,
                                 font_size=sp(14), background_color=C_CARD,
@@ -187,26 +188,29 @@ class CryptoApp(App):
         r2.add_widget(self.tmr_ti)
         self.auto_btn = _btn("开启定时", (0.45, 0.35, 0.25, 1), 14, cb=self._toggle_auto)
         r2.add_widget(self.auto_btn)
-        c.add_widget(r2)
+        cfg_section.add_widget(r2)
 
         self.pbar = ProgressBar(value=0, size_hint_y=None, height=dp(20))
-        c.add_widget(self.pbar)
+        cfg_section.add_widget(self.pbar)
         self.ss = _lbl("就绪：配置 API 后点击扫描", 13, C_SUB)
-        c.add_widget(self.ss)
+        cfg_section.add_widget(self.ss)
 
-        c.add_widget(_lbl("扫描结果", 16, C_TAB, True))
+        p.add_widget(cfg_section)
+
+        # Scrollable results area
+        p.add_widget(_lbl("扫描结果", 16, C_TAB, True))
+        sv = ScrollView()
         self.rb = BoxLayout(orientation='vertical', size_hint_y=None, spacing=dp(4))
         self.rb.bind(minimum_height=self.rb.setter('height'))
-        c.add_widget(self.rb)
+        sv.add_widget(self.rb)
+        p.add_widget(sv)
 
+        # Fixed scan button
         r3 = BoxLayout(size_hint_y=None, height=dp(56), spacing=dp(8))
         self.scan_btn = _btn("开始扫描", C_BTN, 16, True, cb=self._do_scan)
         r3.add_widget(self.scan_btn)
         r3.add_widget(_btn("保存配置到文件", (0.20, 0.20, 0.25, 1), 14, cb=lambda x: self._popup("配置", "已保存" if self._save_cfg() else "失败")))
-        c.add_widget(r3)
-
-        sv.add_widget(c)
-        p.add_widget(sv)
+        p.add_widget(r3)
         return p
 
     # ═══════════════════════ pool ═══════════════════════
