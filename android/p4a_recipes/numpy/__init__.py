@@ -61,21 +61,33 @@ class NumpyRecipe(CompiledComponentsPythonRecipe):
                 content = f.read()
             old = 'def generate_cython():'
             if old in content and 'return  # patched' not in content:
-                # Make generate_cython a no-op
                 new = 'def generate_cython():\n    return  # patched: skip Cython'
                 content = content.replace(old, new)
                 with open(target, 'w') as f:
                     f.write(content)
                 info('Patched setup.py to skip Cython step')
 
+        # Remove -Werror from ccompiler_opt.py (breaks aarch64 cross-compilation)
+        target = os.path.join(build_dir, 'numpy', 'distutils', 'ccompiler_opt.py')
+        if os.path.exists(target):
+            with open(target) as f:
+                content = f.read()
+            old = "'-Werror'"
+            if old in content:
+                content = content.replace(old, "''")
+                with open(target, 'w') as f:
+                    f.write(content)
+                info('Removed -Werror from numpy ccompiler_opt.py')
+
     def get_recipe_env(self, arch=None, with_flags_in_cc=True):
         env = super().get_recipe_env(arch, with_flags_in_cc)
         env["_PYTHON_HOST_PLATFORM"] = arch.command_prefix
         env["NPY_DISABLE_SVML"] = "1"
-        # Fix: remove -Werror which breaks on cross-compilation
-        for key in ['CFLAGS', 'CXXFLAGS', 'CPPFLAGS']:
-            if key in env:
-                env[key] = env[key].replace('-Werror', '-Wno-error')
+        # Suppress -Werror=unsupported-floating-point-opt on aarch64
+        if 'CFLAGS' in env:
+            env['CFLAGS'] += ' -Wno-error=unsupported-floating-point-opt'
+        else:
+            env['CFLAGS'] = '-Wno-error=unsupported-floating-point-opt'
         return env
 
     def _build_compiled_components(self, arch):
