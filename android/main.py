@@ -88,7 +88,8 @@ def _btn(text, bg=C_BTN, s=14, b=False, cb=None):
 def _in(hint='', text='', pw=False):
     t = TextInput(hint_text=hint, text=text, password=pw, multiline=False,
                   font_size=sp(14), background_color=C_CARD, foreground_color=C_TEXT,
-                  cursor_color=C_TAB, padding=[dp(12), dp(12)])
+                  cursor_color=C_TAB, padding=[dp(12), dp(12)],
+                  size_hint_y=None, height=dp(52))
     _font(t)
     return t
 
@@ -162,9 +163,6 @@ class CryptoApp(App):
         self.sec_ti = _in("Secret Key", pw=True)
         self.phr_ti = _in("Passphrase", pw=True)
         self.prx_ti = _in("代理(可选)", self._cfg.get('proxy_url', ''))
-        for ti in [self.api_ti, self.sec_ti, self.phr_ti, self.prx_ti]:
-            ti.size_hint_y = None
-            ti.height = dp(52)
         c.add_widget(self.api_ti)
         c.add_widget(self.sec_ti)
         c.add_widget(self.phr_ti)
@@ -179,9 +177,12 @@ class CryptoApp(App):
         c.add_widget(r1)
 
         c.add_widget(_lbl("定时扫描(秒)", 16, C_TAB, True))
-        self.tmr_ti = _in("600", self._cfg.get('auto_scan_interval', '600'))
-        self.tmr_ti.size_hint_y = None
-        self.tmr_ti.height = dp(52)
+        self.tmr_ti = TextInput(text=self._cfg.get('auto_scan_interval', '600'),
+                                hint_text="600", multiline=False,
+                                font_size=sp(14), background_color=C_CARD,
+                                foreground_color=C_TEXT, size_hint_y=None, height=dp(52),
+                                input_filter='int')
+        _font(self.tmr_ti)
         r2 = BoxLayout(size_hint_y=None, height=dp(56), spacing=dp(8))
         r2.add_widget(self.tmr_ti)
         self.auto_btn = _btn("开启定时", (0.45, 0.35, 0.25, 1), 14, cb=self._toggle_auto)
@@ -210,16 +211,16 @@ class CryptoApp(App):
 
     # ═══════════════════════ pool ═══════════════════════
     def _pool(self):
-        p = BoxLayout(orientation='vertical', padding=dp(8), spacing=dp(4))
-        p.add_widget(_lbl("交易池", 14, C_TAB, True))
-        p.add_widget(_lbl("扫描通过的结果自动汇集到此", 11, C_SUB))
+        p = BoxLayout(orientation='vertical', padding=dp(10), spacing=dp(8))
+        p.add_widget(_lbl("交易池", 16, C_TAB, True))
+        p.add_widget(_lbl("扫描通过的结果自动汇集到此", 13, C_SUB))
         sv = ScrollView()
         self.pc = BoxLayout(orientation='vertical', size_hint_y=None, spacing=dp(3))
         self.pc.bind(minimum_height=self.pc.setter('height'))
         self.pc.add_widget(_lbl("暂无数据", 12, C_SUB))
         sv.add_widget(self.pc)
         p.add_widget(sv)
-        bar = BoxLayout(size_hint_y=None, height=dp(40), spacing=dp(6))
+        bar = BoxLayout(size_hint_y=None, height=dp(52), spacing=dp(8))
         bar.add_widget(_btn("导出扫描记录", (0.25, 0.40, 0.30, 1), 12, cb=lambda x: self._popup("导出", "功能开发中")))
         bar.add_widget(_btn("清空记录", (0.30, 0.30, 0.35, 1), 12, cb=self._clear_pool))
         p.add_widget(bar)
@@ -227,12 +228,12 @@ class CryptoApp(App):
 
     # ═══════════════════════ monitor ═══════════════════════
     def _monitor(self):
-        p = BoxLayout(orientation='vertical', padding=dp(8), spacing=dp(4))
-        p.add_widget(_lbl("监控池", 14, C_TAB, True))
-        p.add_widget(_lbl("添加交易对到监控列表", 11, C_SUB))
-        r = BoxLayout(size_hint_y=None, height=dp(40), spacing=dp(6))
+        p = BoxLayout(orientation='vertical', padding=dp(10), spacing=dp(8))
+        p.add_widget(_lbl("监控池", 16, C_TAB, True))
+        p.add_widget(_lbl("添加交易对到监控列表", 13, C_SUB))
+        r = BoxLayout(size_hint_y=None, height=dp(52), spacing=dp(8))
         self.mi = TextInput(hint_text="如 BTC-USDT-SWAP", multiline=False,
-                            font_size=sp(12), background_color=C_CARD, foreground_color=C_TEXT)
+                            font_size=sp(14), background_color=C_CARD, foreground_color=C_TEXT)
         _font(self.mi)
         r.add_widget(self.mi)
         r.add_widget(_btn("添加", C_BTN, 12, cb=self._add_monitor))
@@ -243,7 +244,7 @@ class CryptoApp(App):
         self.mc.add_widget(_lbl("暂无监控交易对", 12, C_SUB))
         sv.add_widget(self.mc)
         p.add_widget(sv)
-        bar = BoxLayout(size_hint_y=None, height=dp(40), spacing=dp(6))
+        bar = BoxLayout(size_hint_y=None, height=dp(52), spacing=dp(8))
         bar.add_widget(_btn("开始监控", C_ACC, 12, cb=lambda x: self._popup("监控", "功能开发中")))
         bar.add_widget(_btn("停止监控", C_RED, 12, cb=lambda x: self._popup("监控", "已停止")))
         p.add_widget(bar)
@@ -251,12 +252,12 @@ class CryptoApp(App):
 
     # ═══════════════════════ database ═══════════════════════
     def _database(self):
-        p = BoxLayout(orientation='vertical', padding=dp(8), spacing=dp(4))
-        p.add_widget(_lbl("交易对数据库", 14, C_TAB, True))
-        p.add_widget(_lbl("下载历史K线数据", 11, C_SUB))
-        r = BoxLayout(size_hint_y=None, height=dp(40), spacing=dp(6))
+        p = BoxLayout(orientation='vertical', padding=dp(10), spacing=dp(8))
+        p.add_widget(_lbl("交易对数据库", 16, C_TAB, True))
+        p.add_widget(_lbl("下载历史K线数据", 13, C_SUB))
+        r = BoxLayout(size_hint_y=None, height=dp(52), spacing=dp(8))
         self.dbi = TextInput(hint_text="如 BTC-USDT-SWAP", multiline=False,
-                             font_size=sp(12), background_color=C_CARD, foreground_color=C_TEXT)
+                             font_size=sp(14), background_color=C_CARD, foreground_color=C_TEXT)
         _font(self.dbi)
         r.add_widget(self.dbi)
         r.add_widget(_btn("下载K线", C_BTN, 12, cb=lambda x: self._popup("数据库", "功能开发中")))
@@ -267,7 +268,7 @@ class CryptoApp(App):
         self.dc.add_widget(_lbl("暂无数据", 12, C_SUB))
         sv.add_widget(self.dc)
         p.add_widget(sv)
-        bar = BoxLayout(size_hint_y=None, height=dp(40), spacing=dp(6))
+        bar = BoxLayout(size_hint_y=None, height=dp(52), spacing=dp(8))
         bar.add_widget(_btn("刷新", (0.20, 0.20, 0.25, 1), 12, cb=lambda x: self._popup("数据库", "已刷新")))
         bar.add_widget(_btn("清空", C_RED, 12, cb=lambda x: self._popup("数据库", "已清空")))
         p.add_widget(bar)
