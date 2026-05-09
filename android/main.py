@@ -1,8 +1,10 @@
 """
 CryptoScanner Pro - Android Full Version
 """
-import os, sys, json, threading, time, glob, traceback, importlib, warnings
+import os, sys, json, threading, time, glob, traceback, importlib, warnings, logging
 warnings.filterwarnings('ignore')
+logging.getLogger('urllib3').setLevel(logging.WARNING)
+logging.getLogger('requests').setLevel(logging.WARNING)
 
 from kivy.config import Config
 Config.set('graphics', 'width', '390')
@@ -232,6 +234,8 @@ class App(App):
         self._cancel_flag = False
         self._status("连接 OKX..."); self.pb.value = 0
         self.rbox.clear_widgets()
+        t = time.strftime("%H:%M:%S")
+        Clock.schedule_once(lambda dt: self._add_log(f"━━━ 扫描开始 {t} ━━━"))
         threading.Thread(target=self._scan_thread, daemon=True).start()
 
     def _stop_scan(self, btn):
@@ -289,8 +293,18 @@ class App(App):
                 except Exception: continue
                 time.sleep(0.15)
             self._status(f"完成！{found} 个机会"); self._prog(100)
+            if found == 0:
+                Clock.schedule_once(lambda dt: self._add_log("未发现符合条件的交易机会"))
         except Exception as e: self._err(f"扫描失败: {e}")
         finally: self.scanning = False
+
+    def _add_log(self, msg):
+        def _f(dt):
+            l = Label(text=msg, font_size=sp(11), color=C_SUB, halign='left', valign='top',
+                      size_hint_y=None, height=dp(22))
+            _f(l); l.bind(size=l.setter('text_size'))
+            self.rbox.add_widget(l)
+        Clock.schedule_once(_f)
 
     def _add_res(self, r):
         def _f(dt):
