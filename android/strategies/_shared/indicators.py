@@ -187,6 +187,8 @@ def _rsi_wilder(c: pd.Series, period: int = 14) -> float:
         return 100.0 if ag > 0 else 50.0
     return float(100 - 100 / (1 + ag / al))
 
+# Alias for strategies that use _rsi instead of _rsi_wilder
+_rsi = _rsi_wilder
 
 def _macd(close: pd.Series) -> Tuple[pd.Series, pd.Series, pd.Series]:
     """计算 MACD，返回 (DIF, DEA, 柱状线)。"""
