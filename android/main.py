@@ -294,7 +294,7 @@ class App(App):
                         res = self.scanner.scan_symbol(sym)
                         if isinstance(res, dict):
                             if res.get('passed', False) or res.get('score',0) >= 60:
-                                found += 1; self._add_res(res); self.pool.append(res)
+                                found += 1; self._add_res(res)
                     except Exception as e2:
                         self._add_log(f"{iid} 分析出错: {e2}")
                 except Exception as e1:
@@ -312,12 +312,15 @@ class App(App):
         Clock.schedule_once(_f)
 
     def _add_res(self, r):
+        r['scan_time'] = time.strftime("%H:%M:%S")
+        self.pool.append(r)
         def _f(dt):
             d = r.get('direction','NEUTRAL')
             arrow = "↑" if d == 'LONG' else ("↓" if d == 'SHORT' else "→")
             sigs = ' | '.join(r.get('signals',[])[:3]) or '无信号'
             line = f"[b]{r.get('symbol','?')}[/b] {arrow}{d} {r.get('score',0):.0f}分  {sigs}"
             self.rlog.text += line + "\n"
+            self._refresh_pool_display()
         Clock.schedule_once(_f)
 
     def _list_strats(self):
@@ -440,22 +443,50 @@ class App(App):
 
     # ═══════════════════ Pool ═══════════════════
     def _pool_page(self):
-        p = BoxLayout(orientation='vertical', padding=dp(10), spacing=dp(8))
+        p = BoxLayout(orientation='vertical', padding=dp(8), spacing=dp(6))
         p.add_widget(L("交易池 - 扫描结果汇集", 15, C_TAB, True))
-        sv = ScrollView(size_hint_y=1, scroll_type=['bars', 'content'], bar_width=dp(6))
-        self.pc = BoxLayout(orientation='vertical', size_hint_y=None, spacing=dp(3))
-        self.pc.bind(minimum_height=self.pc.setter('height'))
-        if not self.pool: self.pc.add_widget(L("暂无数据, 扫描后自动汇集", 12, C_SUB))
-        sv.add_widget(self.pc)
+        self._pool_count = L("共 0 条记录", 12, C_SUB)
+        p.add_widget(self._pool_count)
+        sv = ScrollView(size_hint_y=1, scroll_type=['bars','content'], bar_width=dp(6))
+        self._pool_text = Label(text="暂无数据, 扫描后自动汇集", font_size=sp(11), color=C_TXT,
+                                halign='left', valign='top', size_hint_y=None, markup=True,
+                                text_size=(dp(370), None))
+        _f(self._pool_text)
+        self._pool_text.bind(width=lambda w, v: setattr(w, 'text_size', (v, None)))
+        self._pool_text.bind(texture_size=self._pool_text.setter('size'))
+        sv.add_widget(self._pool_text)
         p.add_widget(sv)
-        bar = BoxLayout(size_hint_y=None, height=dp(48), spacing=dp(8))
-        bar.add_widget(B("导出记录", (0.25, 0.40, 0.30, 1), 13, cb=lambda x: self._pop("导出", "开发中")))
+        bar = BoxLayout(size_hint_y=None, height=dp(44), spacing=dp(6))
         bar.add_widget(B("清空", C_RED, 13, cb=self._clr_pool))
         p.add_widget(bar)
         return p
 
     def _clr_pool(self, btn):
-        self.pool = []; self.pc.clear_widgets(); self.pc.add_widget(L("已清空", 12, C_SUB))
+        self.pool = []
+        self._pool_text.text = "暂无数据"
+        self._pool_count.text = "共 0 条记录"
+
+    def _refresh_pool_display(self):
+        if not self.pool:
+            self._pool_text.text = "暂无数据"
+            self._pool_count.text = "共 0 条记录"
+            return
+        # Newest first
+        lines = []
+        for i, r in enumerate(reversed(self.pool)):
+            t = r.get('scan_time', '')
+            d = r.get('direction','NEUTRAL')
+            arrow = "↑" if d == 'LONG' else ("↓" if d == 'SHORT' else "→")
+            sigs = ' | '.join(r.get('signals',[])[:3]) or '-'
+            risk = r.get('risk_management', {})
+            sl = risk.get('stop_loss', '-')
+            tp = risk.get('take_profit', '-')
+            line = f"[b]{r.get('symbol','?')}[/b] {arrow}{d} {r.get('score',0):.0f}分  SL:{sl} TP:{tp}  {sigs}"
+            if t:
+                line = f"[{t}] {line}"
+            lines.append(line)
+        self._pool_text.text = "\n".join(lines)
+        self._pool_count.text = f"共 {len(self.pool)} 条记录 (最新优先)"
 
     # ═══════════════════ Trading Monitor ═══════════════════
     def _trade_mon_page(self):
