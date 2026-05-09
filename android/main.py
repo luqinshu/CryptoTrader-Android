@@ -206,10 +206,12 @@ class App(App):
         p.add_widget(self.st)
 
         # results log (scrollable, fills most space)
-        sv = ScrollView(size_hint_y=1, scroll_type=['bars', 'content'], bar_width=dp(6))
-        self.rbox = BoxLayout(orientation='vertical', size_hint_y=None, spacing=dp(3))
-        self.rbox.bind(minimum_height=self.rbox.setter('height'))
-        sv.add_widget(self.rbox)
+        sv = ScrollView(size_hint_y=1, scroll_type=['bars','content'], bar_width=dp(6))
+        self.rlog = Label(text="", font_size=sp(11), color=C_TXT, halign='left', valign='top',
+                          size_hint_y=None, markup=True)
+        _f(self.rlog)
+        self.rlog.bind(texture_size=self.rlog.setter('size'))
+        sv.add_widget(self.rlog)
         p.add_widget(sv)
 
         # three scan buttons at bottom
@@ -234,9 +236,8 @@ class App(App):
         self.scanning = True
         self._cancel_flag = False
         self._status("连接 OKX..."); self.pb.value = 0
-        self.rbox.clear_widgets()
         t = time.strftime("%H:%M:%S")
-        Clock.schedule_once(lambda dt: self._add_log(f"━━━ 扫描开始 {t} ━━━"))
+        Clock.schedule_once(lambda dt: setattr(self.rlog, 'text', f"━━━ 扫描开始 {t} ━━━\n"))
         threading.Thread(target=self._scan_thread, daemon=True).start()
 
     def _stop_scan(self, btn):
@@ -306,22 +307,16 @@ class App(App):
 
     def _add_log(self, msg):
         def _f(dt):
-            l = Label(text=msg, font_size=sp(11), color=C_SUB, halign='left', valign='top',
-                      size_hint_y=None, height=dp(22))
-            _f(l); l.bind(size=l.setter('text_size'))
-            self.rbox.add_widget(l)
+            self.rlog.text += msg + "\n"
         Clock.schedule_once(_f)
 
     def _add_res(self, r):
         def _f(dt):
-            bx = BoxLayout(orientation='vertical', size_hint_y=None, height=dp(52), spacing=dp(2), padding=[dp(6),dp(4)])
-            d = r.get('direction','NEUTRAL'); dc = C_ACC if d=='LONG' else (C_RED if d=='SHORT' else C_SUB)
-            h = BoxLayout(size_hint_y=None, height=dp(22))
-            h.add_widget(L(r.get('symbol','?'), 12, C_TXT, True))
-            h.add_widget(L(f"{d} {r.get('score',0):.0f}分", 12, dc))
-            bx.add_widget(h)
-            bx.add_widget(L(' | '.join(r.get('signals',[])[:3]) or '无信号', 10, C_SUB))
-            self.rbox.add_widget(bx)
+            d = r.get('direction','NEUTRAL')
+            arrow = "↑" if d == 'LONG' else ("↓" if d == 'SHORT' else "→")
+            sigs = ' | '.join(r.get('signals',[])[:3]) or '无信号'
+            line = f"[b]{r.get('symbol','?')}[/b] {arrow}{d} {r.get('score',0):.0f}分  {sigs}"
+            self.rlog.text += line + "\n"
         Clock.schedule_once(_f)
 
     def _list_strats(self):
@@ -479,12 +474,13 @@ class App(App):
         br.add_widget(B("持仓列表", (0.25, 0.45, 0.30, 1), 13, cb=lambda x: self._fetch_positions()))
         p.add_widget(br)
 
-        # positions list
-        sv = ScrollView(size_hint_y=1, scroll_type=['bars', 'content'], bar_width=dp(6))
-        self._tmon_list = BoxLayout(orientation='vertical', size_hint_y=None, spacing=dp(3))
-        self._tmon_list.bind(minimum_height=self._tmon_list.setter('height'))
-        self._tmon_list.add_widget(L("点击刷新/持仓列表查看数据", 12, C_SUB))
-        sv.add_widget(self._tmon_list)
+        # trading monitor positions list - also use text-only
+        sv = ScrollView(size_hint_y=1, scroll_type=['bars','content'], bar_width=dp(6))
+        self._tmon_text = Label(text="点击刷新/持仓列表查看数据", font_size=sp(12), color=C_SUB,
+                                halign='left', valign='top', size_hint_y=None, markup=True)
+        _f(self._tmon_text)
+        self._tmon_text.bind(texture_size=self._tmon_text.setter('size'))
+        sv.add_widget(self._tmon_text)
         p.add_widget(sv)
         return p
 
@@ -531,35 +527,25 @@ class App(App):
             self._init_okx()
             pos = self.okx.get_positions()
             def update(dt):
-                self._tmon_list.clear_widgets()
                 if isinstance(pos, dict) and pos.get('code') == '0':
                     data = pos.get('data', [])
                     if not data:
-                        self._tmon_list.add_widget(L("暂无持仓", 12, C_SUB))
+                        self._tmon_text.text = "暂无持仓"
                         return
+                    lines = []
                     for p in data:
                         iid = p.get('instId', '?')
                         side = "多" if p.get('posSide') == 'long' else "空"
                         qty = p.get('pos', '0')
-                        pnl = p.get('upl', '0')
+                        pnl = float(p.get('upl', 0))
                         lev = p.get('lever', '1')
                         avg_px = p.get('avgPx', '0')
                         mark = p.get('markPx', '0')
-                        c = C_ACC if float(pnl) >= 0 else C_RED
-                        row = BoxLayout(orientation='vertical', size_hint_y=None, height=dp(64), spacing=dp(2), padding=[dp(6),dp(4)])
-                        h = BoxLayout(size_hint_y=None, height=dp(24))
-                        h.add_widget(L(f"{iid} {side}", 12, C_TXT, True))
-                        h.add_widget(L(f"{qty}张 {lev}x", 12, C_TXT))
-                        row.add_widget(h)
-                        h2 = BoxLayout(size_hint_y=None, height=dp(20))
-                        h2.add_widget(L(f"均价 {avg_px}  标记 {mark}", 10, C_SUB))
-                        row.add_widget(h2)
-                        h3 = BoxLayout(size_hint_y=None, height=dp(20))
-                        h3.add_widget(L(f"盈亏 {pnl} USDT", 11, c, True))
-                        row.add_widget(h3)
-                        self._tmon_list.add_widget(row)
+                        sign = "+" if pnl >= 0 else ""
+                        lines.append(f"[b]{iid} {side}[/b]  {qty}张 {lev}x | 均价{avg_px} 标记{mark} | 盈亏 [b]{sign}{pnl}[/b] USDT")
+                    self._tmon_text.text = "\n".join(lines)
                 else:
-                    self._tmon_list.add_widget(L("获取持仓失败", 12, C_SUB))
+                    self._tmon_text.text = "获取持仓失败"
             Clock.schedule_once(update)
         except Exception as e:
             Clock.schedule_once(lambda dt: self._pop("错误", str(e)))
