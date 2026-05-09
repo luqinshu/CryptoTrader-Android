@@ -313,6 +313,7 @@ class App(App):
 
     def _add_res(self, r):
         r['scan_time'] = time.strftime("%H:%M:%S")
+        r['strategy'] = self._cur_strat_name
         self.pool.append(r)
         def _f(dt):
             d = r.get('direction','NEUTRAL')
@@ -490,7 +491,7 @@ class App(App):
 
         # table header
         hdr = BoxLayout(size_hint_y=None, height=dp(28), spacing=dp(2))
-        cols = [("时间", 0.15), ("交易对", 0.22), ("方向", 0.12), ("评分", 0.10), ("止损", 0.15), ("止盈", 0.15), ("操作", 0.11)]
+        cols = [("时间", 0.13), ("交易对", 0.20), ("方向", 0.11), ("评分", 0.10), ("策略来源", 0.20), ("走势预判", 0.16), ("操作", 0.10)]
         for title, w in cols:
             hdr.add_widget(Label(text=f"[b]{title}[/b]", font_size=sp(10), color=C_TAB,
                                  markup=True, halign='center', valign='middle',
@@ -504,14 +505,13 @@ class App(App):
             sym = r.get('symbol', '?').replace('-USDT-SWAP', '')
             d = r.get('direction', '-')
             score = f"{r.get('score',0):.0f}"
-            risk = r.get('risk_management', {})
-            sl = risk.get('stop_loss', '-')
-            tp = risk.get('take_profit', '-')
+            strategy_src = r.get('strategy', self._cur_strat_name)[:12]
+            outlook = r.get('rating', d)[:12]
             dcolor = C_ACC if d == 'LONG' else (C_RED if d == 'SHORT' else C_SUB)
             arrow = "↑" if d == 'LONG' else ("↓" if d == 'SHORT' else "→")
 
             row = BoxLayout(size_hint_y=None, height=dp(30), spacing=dp(2))
-            vals = [t, sym, f"{arrow}{d}", score, str(sl), str(tp)]
+            vals = [t, sym, f"{arrow}{d}", score, strategy_src, outlook]
             for i, (val, (_, w)) in enumerate(zip(vals, cols[:-1])):
                 color = dcolor if i == 2 else C_TXT
                 bg = C_CRD if real_idx % 2 == 0 else C_OFF
