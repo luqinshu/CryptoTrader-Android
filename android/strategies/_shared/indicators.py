@@ -190,6 +190,13 @@ def _rsi_wilder(c: pd.Series, period: int = 14) -> float:
 # Alias for strategies that use _rsi instead of _rsi_wilder
 _rsi = _rsi_wilder
 
+def _macd_mom(c: pd.Series) -> float:
+    """MACD momentum (histogram) latest value"""
+    diff, dea, hist = _macd(c)
+    if len(hist) == 0:
+        return 0.0
+    return float(hist.iloc[-1])
+
 def _macd(close: pd.Series) -> Tuple[pd.Series, pd.Series, pd.Series]:
     """计算 MACD，返回 (DIF, DEA, 柱状线)。"""
     e12 = close.ewm(span=12, adjust=False).mean()
