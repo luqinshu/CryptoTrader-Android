@@ -445,33 +445,38 @@ class App(App):
         self._do_load_file(fpath, fname+'.py')
 
     def _load_from_file(self, btn):
-        strat_dir = os.path.join(self.dir, 'strategies')
-        files = sorted(glob.glob(os.path.join(strat_dir, '*.py')))
-        display = [(os.path.basename(f), f) for f in files if not os.path.basename(f).startswith('_')]
+        from kivy.uix.filechooser import FileChooserListView
 
-        if not display:
-            self._pop("提示", "无可用策略文件"); return
+        c = BoxLayout(orientation='vertical', padding=dp(6), spacing=dp(4))
+        c.add_widget(L("浏览选择策略文件 (.py)", 13, C_TAB, True))
 
-        c = BoxLayout(orientation='vertical', padding=dp(8), spacing=dp(6))
-        c.add_widget(L("选择策略文件", 14, C_TAB, True))
-        sv = ScrollView(size_hint_y=1, scroll_type=['bars', 'content'], bar_width=dp(6))
-        flist = BoxLayout(orientation='vertical', size_hint_y=None, spacing=dp(4))
-        flist.bind(minimum_height=flist.setter('height'))
+        # start path: internal storage on Android, strategy dir on desktop
+        start = self.dir
+        for rp in ['/sdcard', '/storage/emulated/0', os.path.expanduser('~')]:
+            if os.path.isdir(rp):
+                start = rp; break
 
-        self._file_popup = Popup(title="加载策略文件", content=c, size_hint=(0.88, 0.7),
-                                 background_color=(0.12, 0.12, 0.15, 0.97), separator_color=C_TAB, auto_dismiss=True)
+        fc = FileChooserListView(path=start, filters=['*.py'], size_hint_y=1)
+        c.add_widget(fc)
 
-        for fn, fp in display:
-            btn = Button(text=fn, font_size=sp(13), color=C_TXT,
-                         background_color=C_CRD, background_normal='',
-                         size_hint_y=None, height=dp(48))
-            _f(btn)
-            btn.bind(on_release=lambda x, p=fp, n=fn: self._do_load_file(p, n))
-            flist.add_widget(btn)
-        sv.add_widget(flist)
-        c.add_widget(sv)
-        c.add_widget(B("关闭", C_BTN, 13, cb=self._file_popup.dismiss))
-        self._file_popup.open()
+        pp = Popup(title="加载策略文件", content=c, size_hint=(0.92, 0.78),
+                   background_color=(0.12, 0.12, 0.15, 0.97), separator_color=C_TAB, auto_dismiss=False)
+
+        br = BoxLayout(size_hint_y=None, height=dp(44), spacing=dp(6))
+        br.add_widget(B("取消", (0.25, 0.25, 0.30, 1), 13, cb=pp.dismiss))
+        br.add_widget(B("加载选中", C_BTN, 13,
+                        cb=lambda x: self._on_file_selected(fc.selection, pp)))
+        c.add_widget(br)
+        pp.open()
+
+    def _on_file_selected(self, selection, popup):
+        if not selection:
+            self._pop("提示", "请先选择一个文件"); return
+        path = selection[0]
+        if not path.endswith('.py'):
+            self._pop("提示", "请选择 .py 策略文件"); return
+        popup.dismiss()
+        self._do_load_file(path, os.path.basename(path))
 
     def _show_strat_popup(self, btn):
         """Show popup with multi-select strategies for batch scanning"""
