@@ -49,7 +49,7 @@ except Exception:
     _HAS_BASE = _HAS_SCANNER_BASE
 
 from strategies._shared.indicators import (
-    _to_df, _aggregate_bars, _ema, _rsi_wilder, _adx, _efficiency_ratio,
+    _to_df, _aggregate_bars, _ema, _rsi, _rsi_wilder, _adx, _efficiency_ratio,
     _volume_zscore, _robust_zscore, _measure_trend_age, _micro_pullback_continuation,
     _safe_float, _clamp, _calc_atr, _calc_volume_delta, _calc_vwap,
     _pct_change, _cfg_float,
