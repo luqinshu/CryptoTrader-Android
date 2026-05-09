@@ -89,6 +89,7 @@ class App(App):
         self.scanning = False
         self.pool = []
         self.monitors = []
+        self.pool = []
         self.auto_timer = None
 
         root = BoxLayout(orientation='vertical')
@@ -101,7 +102,7 @@ class App(App):
         root.add_widget(tb)
 
         # tab bar
-        self.tabs = ['交易扫描', '交易池', '监控池', '数据']
+        self.tabs = ['交易扫描', '交易池', '交易监控', '数据']
         self.tbtns = []
         tr = BoxLayout(size_hint_y=None, height=dp(44), spacing=dp(2))
         for i,n in enumerate(self.tabs):
@@ -124,7 +125,7 @@ class App(App):
     def _tab(self, btn):
         for b in self.tbtns: b.background_color = C_TAB if b is btn else C_OFF
         self.content.clear_widgets()
-        self.content.add_widget([self._scan_page(), self._pool_page(), self._mon_page(), self._data_page()][btn.t])
+        self.content.add_widget([self._scan_page(), self._pool_page(), self._trade_mon_page(), self._data_page()][btn.t])
 
     # ═══════════════════ API Popup ═══════════════════
     def _show_api_popup(self):
@@ -437,45 +438,110 @@ class App(App):
     def _clr_pool(self, btn):
         self.pool = []; self.pc.clear_widgets(); self.pc.add_widget(L("已清空", 12, C_SUB))
 
-    # ═══════════════════ Monitor ═══════════════════
-    def _mon_page(self):
-        p = BoxLayout(orientation='vertical', padding=dp(10), spacing=dp(8))
-        p.add_widget(L("监控池", 15, C_TAB, True))
-        r = BoxLayout(size_hint_y=None, height=dp(48), spacing=dp(8))
-        self.mi = TextInput(hint_text="如 BTC-USDT-SWAP", multiline=False,
-                            font_size=sp(14), background_color=C_CRD, foreground_color=C_TXT)
-        _f(self.mi); r.add_widget(self.mi)
-        r.add_widget(B("添加", C_BTN, 13, cb=self._add_mon))
-        p.add_widget(r)
+    # ═══════════════════ Trading Monitor ═══════════════════
+    def _trade_mon_page(self):
+        p = BoxLayout(orientation='vertical', padding=dp(8), spacing=dp(4))
+        p.add_widget(L("交易监控", 15, C_TAB, True))
+
+        # account summary
+        self._tmon_balance = L("账户: ----", 14, C_TXT, True)
+        p.add_widget(self._tmon_balance)
+        self._tmon_equity = L("权益: ----", 13, C_TXT)
+        p.add_widget(self._tmon_equity)
+        self._tmon_pnl = L("未实现盈亏: ----", 13, C_TXT)
+        p.add_widget(self._tmon_pnl)
+
+        br = BoxLayout(size_hint_y=None, height=dp(44), spacing=dp(6))
+        br.add_widget(B("刷新", C_BTN, 13, cb=lambda x: self._refresh_trade_mon()))
+        br.add_widget(B("持仓列表", (0.25, 0.45, 0.30, 1), 13, cb=lambda x: self._fetch_positions()))
+        p.add_widget(br)
+
+        # positions list
         sv = ScrollView(size_hint_y=1)
-        self.mc = BoxLayout(orientation='vertical', size_hint_y=None, spacing=dp(3))
-        self.mc.bind(minimum_height=self.mc.setter('height'))
-        self._refresh_mon_view()
-        sv.add_widget(self.mc)
+        self._tmon_list = BoxLayout(orientation='vertical', size_hint_y=None, spacing=dp(3))
+        self._tmon_list.bind(minimum_height=self._tmon_list.setter('height'))
+        self._tmon_list.add_widget(L("点击刷新/持仓列表查看数据", 12, C_SUB))
+        sv.add_widget(self._tmon_list)
         p.add_widget(sv)
-        bar = BoxLayout(size_hint_y=None, height=dp(48), spacing=dp(8))
-        bar.add_widget(B("开始监控", C_ACC, 13, cb=lambda x: self._pop("监控", "开发中")))
-        bar.add_widget(B("停止", C_RED, 13, cb=lambda x: self._pop("监控", "已停止")))
-        p.add_widget(bar)
         return p
 
-    def _add_mon(self, btn):
-        s = self.mi.text.strip()
-        if s and s not in self.monitors:
-            self.monitors.append(s); self.mi.text = ''; self._refresh_mon_view()
+    def _refresh_trade_mon(self):
+        k = self.cfg.get('api_key',''); s = self.cfg.get('secret_key','')
+        if not k or not s: self._pop("提示", "请先在 API 设置中填写 Key"); return
+        self._status("刷新账户...")
+        threading.Thread(target=self._refresh_trade_thread, daemon=True).start()
 
-    def _refresh_mon_view(self):
-        self.mc.clear_widgets()
-        if not self.monitors: self.mc.add_widget(L("暂无监控交易对", 12, C_SUB)); return
-        for s in self.monitors:
-            r = BoxLayout(size_hint_y=None, height=dp(42), spacing=dp(6))
-            r.add_widget(L(s, 13, C_TXT))
-            r.add_widget(B("删除", C_RED, 11, cb=lambda x, sym=s: self._rm_mon(sym)))
-            self.mc.add_widget(r)
+    def _refresh_trade_thread(self):
+        try:
+            self._init_okx()
+            # balance
+            bal = self.okx.get_balance()
+            if isinstance(bal, dict) and bal.get('code') == '0':
+                data = bal.get('data', [])
+                if data and len(data) > 0:
+                    d = data[0]
+                    eq = d.get('totalEq', '0')
+                    bal_usdt = d.get('details', [])
+                    usdt = next((x for x in bal_usdt if x.get('ccy') == 'USDT'), {})
+                    avail = usdt.get('availEq', '0')
+                    Clock.schedule_once(lambda dt: setattr(self._tmon_balance, 'text', f"可用: {avail} USDT"))
+                    Clock.schedule_once(lambda dt: setattr(self._tmon_equity, 'text', f"总权益: {eq} USDT"))
+                else:
+                    Clock.schedule_once(lambda dt: setattr(self._tmon_balance, 'text', "无余额数据"))
+            else:
+                Clock.schedule_once(lambda dt: setattr(self._tmon_balance, 'text', "获取余额失败"))
 
-    def _rm_mon(self, s):
-        if s in self.monitors: self.monitors.remove(s)
-        self._refresh_mon_view()
+            # positions
+            self._fetch_positions_thread()
+            Clock.schedule_once(lambda dt: self._status("已刷新"))
+        except Exception as e:
+            Clock.schedule_once(lambda dt: self._pop("错误", str(e)))
+
+    def _fetch_positions(self):
+        k = self.cfg.get('api_key',''); s = self.cfg.get('secret_key','')
+        if not k or not s: self._pop("提示", "请先填写 API Key"); return
+        self._status("获取持仓...")
+        threading.Thread(target=self._fetch_positions_thread, daemon=True).start()
+
+    def _fetch_positions_thread(self):
+        try:
+            self._init_okx()
+            pos = self.okx.get_positions()
+            def update(dt):
+                self._tmon_list.clear_widgets()
+                if isinstance(pos, dict) and pos.get('code') == '0':
+                    data = pos.get('data', [])
+                    if not data:
+                        self._tmon_list.add_widget(L("暂无持仓", 12, C_SUB))
+                        return
+                    for p in data:
+                        iid = p.get('instId', '?')
+                        side = "多" if p.get('posSide') == 'long' else "空"
+                        qty = p.get('pos', '0')
+                        pnl = p.get('upl', '0')
+                        lev = p.get('lever', '1')
+                        avg_px = p.get('avgPx', '0')
+                        mark = p.get('markPx', '0')
+                        c = C_ACC if float(pnl) >= 0 else C_RED
+                        row = BoxLayout(orientation='vertical', size_hint_y=None, height=dp(64), spacing=dp(2))
+                        with row.canvas.before: Color(*C_CRD); row._b = Rectangle(pos=row.pos, size=row.size)
+                        row.bind(pos=lambda i,v: setattr(row._b,'pos',v), size=lambda i,v: setattr(row._b,'size',v))
+                        h = BoxLayout(size_hint_y=None, height=dp(24))
+                        h.add_widget(L(f"{iid} {side}", 12, C_TXT, True))
+                        h.add_widget(L(f"{qty}张 {lev}x", 12, C_TXT))
+                        row.add_widget(h)
+                        h2 = BoxLayout(size_hint_y=None, height=dp(20))
+                        h2.add_widget(L(f"均价 {avg_px}  标记 {mark}", 10, C_SUB))
+                        row.add_widget(h2)
+                        h3 = BoxLayout(size_hint_y=None, height=dp(20))
+                        h3.add_widget(L(f"盈亏 {pnl} USDT", 11, c, True))
+                        row.add_widget(h3)
+                        self._tmon_list.add_widget(row)
+                else:
+                    self._tmon_list.add_widget(L("获取持仓失败", 12, C_SUB))
+            Clock.schedule_once(update)
+        except Exception as e:
+            Clock.schedule_once(lambda dt: self._pop("错误", str(e)))
 
     # ═══════════════════ Data ═══════════════════
     def _data_page(self):
