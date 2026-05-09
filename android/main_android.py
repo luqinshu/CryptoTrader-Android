@@ -443,56 +443,77 @@ class App(App):
 
     # ═══════════════════ Pool ═══════════════════
     def _pool_page(self):
-        p = BoxLayout(orientation='vertical', padding=dp(8), spacing=dp(6))
+        p = BoxLayout(orientation='vertical', padding=dp(6), spacing=dp(4))
         p.add_widget(L("交易池 - 扫描结果汇集", 15, C_TAB, True))
-        self._pool_count = L("共 0 条记录", 12, C_SUB)
+        self._pool_count = L("共 0 条", 12, C_SUB)
         p.add_widget(self._pool_count)
+
+        # scrollable item list
         sv = ScrollView(size_hint_y=1, scroll_type=['bars','content'], bar_width=dp(6))
-        self._pool_text = Label(text="暂无数据, 扫描后自动汇集", font_size=sp(11), color=C_TXT,
-                                halign='left', valign='top', size_hint_y=None, markup=True,
-                                text_size=(dp(370), None))
-        _f(self._pool_text)
-        self._pool_text.bind(width=lambda w, v: setattr(w, 'text_size', (v, None)))
-        self._pool_text.bind(texture_size=self._pool_text.setter('size'))
-        sv.add_widget(self._pool_text)
+        self._pool_list = BoxLayout(orientation='vertical', size_hint_y=None, spacing=dp(2))
+        self._pool_list.bind(minimum_height=self._pool_list.setter('height'))
+        sv.add_widget(self._pool_list)
         p.add_widget(sv)
+
+        # bottom buttons
         bar = BoxLayout(size_hint_y=None, height=dp(44), spacing=dp(6))
-        bar.add_widget(B("清空", C_RED, 13, cb=self._clr_pool))
+        self._pool_selected = None
+        self._pool_sel_label = L("未选中", 11, C_SUB)
+        bar.add_widget(self._pool_sel_label)
+        bar.add_widget(B("移除选中", C_RED, 12, cb=self._remove_pool_selected))
+        bar.add_widget(B("清空全部", (0.30, 0.30, 0.35, 1), 12, cb=self._clr_pool))
         p.add_widget(bar)
-        self._refresh_pool_display()  # show existing data
+
+        self._refresh_pool_display()
         return p
 
     def _clr_pool(self, btn):
         self.pool = []
-        if hasattr(self, '_pool_text') and self._pool_text:
-            self._pool_text.text = "暂无数据"
-        if hasattr(self, '_pool_count') and self._pool_count:
-            self._pool_count.text = "共 0 条记录"
+        self._pool_sel_label.text = "未选中"
+        self._pool_selected = None
+        self._refresh_pool_display()
+
+    def _remove_pool_selected(self, btn):
+        if self._pool_selected is not None and 0 <= self._pool_selected < len(self.pool):
+            del self.pool[self._pool_selected]
+            self._pool_selected = None
+            self._pool_sel_label.text = "未选中"
+            self._refresh_pool_display()
 
     def _refresh_pool_display(self):
-        if not hasattr(self, '_pool_text') or not self._pool_text:
+        if not hasattr(self, '_pool_list') or not self._pool_list:
             return
+        self._pool_list.clear_widgets()
         if not self.pool:
-            self._pool_text.text = "暂无数据"
-            self._pool_count.text = "共 0 条记录"
+            self._pool_list.add_widget(L("暂无数据", 12, C_SUB))
+            if hasattr(self, '_pool_count') and self._pool_count:
+                self._pool_count.text = "共 0 条"
             return
-        # Newest first
-        lines = []
-        for i, r in enumerate(reversed(self.pool)):
+        if hasattr(self, '_pool_count') and self._pool_count:
+            self._pool_count.text = f"共 {len(self.pool)} 条"
+        for idx, r in enumerate(reversed(self.pool)):
+            real_idx = len(self.pool) - 1 - idx
             t = r.get('scan_time', '')
             d = r.get('direction','NEUTRAL')
             arrow = "↑" if d == 'LONG' else ("↓" if d == 'SHORT' else "→")
-            sigs = ' | '.join(r.get('signals',[])[:3]) or '-'
-            risk = r.get('risk_management', {})
-            sl = risk.get('stop_loss', '-')
-            tp = risk.get('take_profit', '-')
-            line = f"[b]{r.get('symbol','?')}[/b] {arrow}{d} {r.get('score',0):.0f}分  SL:{sl} TP:{tp}  {sigs}"
-            if t:
-                line = f"[{t}] {line}"
-            lines.append(line)
-        self._pool_text.text = "\n".join(lines)
-        if hasattr(self, '_pool_count') and self._pool_count:
-            self._pool_count.text = f"共 {len(self.pool)} 条记录 (最新优先)"
+            dc = (0.3, 0.9, 0.4, 1) if d == 'LONG' else ((0.9, 0.3, 0.3, 1) if d == 'SHORT' else (0.6, 0.6, 0.6, 1))
+            line = f"[b]{r.get('symbol','?')}[/b] {arrow}{d} {r.get('score',0):.0f}分"
+            if t: line = f"[{t}] {line}"
+            # Each row
+            row = BoxLayout(size_hint_y=None, height=dp(36), spacing=dp(4))
+            sel_btn = Button(text=line, font_size=sp(11), color=dc, halign='left', valign='middle',
+                             background_color=C_CRD, background_normal='', markup=True)
+            _f(sel_btn)
+            sel_btn.bind(size=sel_btn.setter('text_size'))
+            sel_btn.bind(on_release=lambda x, i=real_idx: self._select_pool_item(i))
+            row.add_widget(sel_btn)
+            self._pool_list.add_widget(row)
+
+    def _select_pool_item(self, idx):
+        self._pool_selected = idx
+        if idx < len(self.pool):
+            item = self.pool[idx]
+            self._pool_sel_label.text = f"已选: {item.get('symbol','?')}"
 
     # ═══════════════════ Trading Monitor ═══════════════════
     def _trade_mon_page(self):
