@@ -456,11 +456,7 @@ class App(App):
         p.add_widget(sv)
 
         # bottom buttons
-        bar = BoxLayout(size_hint_y=None, height=dp(44), spacing=dp(6))
-        self._pool_selected = None
-        self._pool_sel_label = L("未选中", 11, C_SUB)
-        bar.add_widget(self._pool_sel_label)
-        bar.add_widget(B("移除选中", C_RED, 12, cb=self._remove_pool_selected))
+        bar = BoxLayout(size_hint_y=None, height=dp(40), spacing=dp(6))
         bar.add_widget(B("清空全部", (0.30, 0.30, 0.35, 1), 12, cb=self._clr_pool))
         p.add_widget(bar)
 
@@ -491,29 +487,51 @@ class App(App):
             return
         if hasattr(self, '_pool_count') and self._pool_count:
             self._pool_count.text = f"共 {len(self.pool)} 条"
+
+        # table header
+        hdr = BoxLayout(size_hint_y=None, height=dp(28), spacing=dp(2))
+        cols = [("时间", 0.15), ("交易对", 0.22), ("方向", 0.12), ("评分", 0.10), ("止损", 0.15), ("止盈", 0.15), ("操作", 0.11)]
+        for title, w in cols:
+            hdr.add_widget(Label(text=f"[b]{title}[/b]", font_size=sp(10), color=C_TAB,
+                                 markup=True, halign='center', valign='middle',
+                                 size_hint_x=w, text_size=(None, dp(28))))
+        self._pool_list.add_widget(hdr)
+
+        # data rows
         for idx, r in enumerate(reversed(self.pool)):
             real_idx = len(self.pool) - 1 - idx
-            t = r.get('scan_time', '')
-            d = r.get('direction','NEUTRAL')
+            t = r.get('scan_time', '-')
+            sym = r.get('symbol', '?').replace('-USDT-SWAP', '')
+            d = r.get('direction', '-')
+            score = f"{r.get('score',0):.0f}"
+            risk = r.get('risk_management', {})
+            sl = risk.get('stop_loss', '-')
+            tp = risk.get('take_profit', '-')
+            dcolor = C_ACC if d == 'LONG' else (C_RED if d == 'SHORT' else C_SUB)
             arrow = "↑" if d == 'LONG' else ("↓" if d == 'SHORT' else "→")
-            dc = (0.3, 0.9, 0.4, 1) if d == 'LONG' else ((0.9, 0.3, 0.3, 1) if d == 'SHORT' else (0.6, 0.6, 0.6, 1))
-            line = f"[b]{r.get('symbol','?')}[/b] {arrow}{d} {r.get('score',0):.0f}分"
-            if t: line = f"[{t}] {line}"
-            # Each row
-            row = BoxLayout(size_hint_y=None, height=dp(36), spacing=dp(4))
-            sel_btn = Button(text=line, font_size=sp(11), color=dc, halign='left', valign='middle',
-                             background_color=C_CRD, background_normal='', markup=True)
-            _f(sel_btn)
-            sel_btn.bind(size=sel_btn.setter('text_size'))
-            sel_btn.bind(on_release=lambda x, i=real_idx: self._select_pool_item(i))
-            row.add_widget(sel_btn)
+
+            row = BoxLayout(size_hint_y=None, height=dp(30), spacing=dp(2))
+            vals = [t, sym, f"{arrow}{d}", score, str(sl), str(tp)]
+            for i, (val, (_, w)) in enumerate(zip(vals, cols[:-1])):
+                color = dcolor if i == 2 else C_TXT
+                bg = C_CRD if real_idx % 2 == 0 else C_OFF
+                lbl = Label(text=val, font_size=sp(10), color=color, markup=True,
+                           halign='center', valign='middle', size_hint_x=w)
+                _f(lbl)
+                row.add_widget(lbl)
+            # delete button
+            del_btn = Button(text="✕", font_size=sp(10), color=C_RED,
+                            background_color=C_CRD, background_normal='',
+                            size_hint_x=cols[-1][1])
+            _f(del_btn)
+            del_btn.bind(on_release=lambda x, i=real_idx: self._del_pool_item(i))
+            row.add_widget(del_btn)
             self._pool_list.add_widget(row)
 
-    def _select_pool_item(self, idx):
-        self._pool_selected = idx
-        if idx < len(self.pool):
-            item = self.pool[idx]
-            self._pool_sel_label.text = f"已选: {item.get('symbol','?')}"
+    def _del_pool_item(self, idx):
+        if 0 <= idx < len(self.pool):
+            del self.pool[idx]
+            self._refresh_pool_display()
 
     # ═══════════════════ Trading Monitor ═══════════════════
     def _trade_mon_page(self):
