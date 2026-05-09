@@ -493,9 +493,10 @@ class App(App):
         hdr = BoxLayout(size_hint_y=None, height=dp(28), spacing=dp(2))
         cols = [("时间", 0.13), ("交易对", 0.20), ("方向", 0.11), ("评分", 0.10), ("策略来源", 0.20), ("走势预判", 0.16), ("操作", 0.10)]
         for title, w in cols:
-            hdr.add_widget(Label(text=f"[b]{title}[/b]", font_size=sp(10), color=C_TAB,
-                                 markup=True, halign='center', valign='middle',
-                                 size_hint_x=w, text_size=(None, dp(28))))
+            lbl = Label(text=title, font_size=sp(11), color=C_TAB, bold=True,
+                        halign='center', valign='middle', size_hint_x=w)
+            _f(lbl)
+            hdr.add_widget(lbl)
         self._pool_list.add_widget(hdr)
 
         # data rows
@@ -514,8 +515,7 @@ class App(App):
             vals = [t, sym, f"{arrow}{d}", score, strategy_src, outlook]
             for i, (val, (_, w)) in enumerate(zip(vals, cols[:-1])):
                 color = dcolor if i == 2 else C_TXT
-                bg = C_CRD if real_idx % 2 == 0 else C_OFF
-                lbl = Label(text=val, font_size=sp(10), color=color, markup=True,
+                lbl = Label(text=val, font_size=sp(10), color=color,
                            halign='center', valign='middle', size_hint_x=w)
                 _f(lbl)
                 row.add_widget(lbl)
