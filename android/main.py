@@ -88,8 +88,16 @@ class App(App):
         self.scanning = False
         self.pool = []
         self.monitors = []
-        self.pool = []
+        self.positions_data = []
+        self._tmon_balance_text = "账户: ----"
+        self._tmon_equity_text = "权益: ----"
         self.auto_timer = None
+        self._auto_seconds = 0
+        self._selected_strat_names = list(self.cfg.get('selected_strategies', ['OKX小时线波段共振策略']))
+        self._strat_scanners = {}
+        self._pool_monitoring = False
+        self._pool_monitor_timer = None
+        self._monitor_lock = threading.Lock()
 
         root = BoxLayout(orientation='vertical')
 
@@ -183,20 +191,30 @@ class App(App):
 
         # row 2: strategy picker button -> popup
         sr2 = BoxLayout(size_hint_y=None, height=dp(40), spacing=dp(4))
-        self._cur_strat_name = 'OKX小时线波段共振策略'
-        self._strat_btn = B(f"策略: {self._cur_strat_name}", (0.20, 0.25, 0.30, 1), 12, cb=self._show_strat_popup)
+        self._cur_strat_name = self._selected_strat_names[0] if self._selected_strat_names else 'OKX小时线波段共振策略'
+        n = len(self._selected_strat_names)
+        btn_txt = f"策略({n}): {self._cur_strat_name}" if n == 1 else f"策略: {n}个已选"
+        self._strat_btn = B(btn_txt, (0.20, 0.25, 0.30, 1), 12, cb=self._show_strat_popup)
         sr2.add_widget(self._strat_btn)
         sr2.add_widget(B("从文件加载", (0.25, 0.45, 0.30, 1), 12, cb=self._load_from_file))
         p.add_widget(sr2)
 
-        # row 3: interval
-        ir = BoxLayout(size_hint_y=None, height=dp(40), spacing=dp(4))
+        # row 3: interval + countdown
+        ir = BoxLayout(size_hint_y=None, height=dp(40), spacing=dp(6))
+        lbl_int = Label(text="间隔(秒)", font_size=sp(12), color=C_SUB,
+                        halign='left', valign='middle', size_hint_x=None, width=dp(60))
+        _f(lbl_int)
+        ir.add_widget(lbl_int)
         self.tm = TextInput(text=str(self.cfg.get('interval','600')), hint_text="秒", multiline=False,
                             font_size=sp(12), background_color=C_CRD, foreground_color=C_TXT,
-                            size_hint_y=None, height=dp(40), input_filter='int', size_hint_x=0.15)
+                            size_hint_y=None, height=dp(40), input_filter='int', size_hint_x=0.12)
         _f(self.tm)
         ir.add_widget(self.tm)
-        ir.add_widget(Label())  # spacer
+        self._cd_label = Label(text="", font_size=sp(13), color=C_WARN, bold=True,
+                               halign='right', valign='middle', size_hint_x=0.35)
+        self._cd_label.bind(size=lambda w, v: setattr(w, 'text_size', (v[0], None)))
+        _f(self._cd_label)
+        ir.add_widget(self._cd_label)
         p.add_widget(ir)
 
         # progress + status
@@ -222,6 +240,7 @@ class App(App):
         self.ab = B("定时扫描", C_WARN, 14, cb=self._start_auto)
         br.add_widget(self.ab)
         p.add_widget(br)
+        self._update_cd()
         return p
 
     def _init_okx(self):
@@ -251,15 +270,45 @@ class App(App):
     def _start_auto(self, btn):
         if self.auto_timer:
             self.auto_timer.cancel(); self.auto_timer = None
+            self._auto_seconds = 0
             self.ab.text = "定时扫描"; self.ab.background_color = C_WARN
+            self._cd_label.text = ""
             self._status("定时已停止")
         else:
-            try: sec = max(60, int(self.tm.text))
+            try: sec = max(10, int(self.tm.text))
             except ValueError: sec = 600
+            self._auto_seconds = sec
             self.ab.text = "停止"; self.ab.background_color = C_RED
             self._save()
-            self._status(f"定时 {sec}秒"); self._scan(auto=True)
-            self.auto_timer = Clock.schedule_interval(lambda dt: self._scan(auto=True), sec)
+            self._status(f"定时 {sec}秒")
+            self._scan(auto=True)
+            self._update_cd()
+            self.auto_timer = Clock.schedule_interval(self._cd_tick, 1)
+
+    def _cd_tick(self, dt):
+        if self.scanning:
+            self._update_cd()
+            return
+        self._auto_seconds -= 1
+        if self._auto_seconds <= 0:
+            self._scan(auto=True)
+            try: sec = max(10, int(self.tm.text))
+            except ValueError: sec = 600
+            self._auto_seconds = sec
+        self._update_cd()
+
+    def _update_cd(self):
+        if not hasattr(self, '_cd_label') or not self._cd_label:
+            return
+        if self.scanning:
+            self._cd_label.text = "扫描中..."
+            self._cd_label.color = C_TAB
+        elif self._auto_seconds > 0:
+            self._cd_label.text = f"下次: {self._auto_seconds}s"
+            self._cd_label.color = C_ACC if self._auto_seconds <= 10 else C_WARN
+        else:
+            self._cd_label.text = ""
+            self._cd_label.color = C_WARN
 
     def _scan_thread(self):
         try:
@@ -272,36 +321,54 @@ class App(App):
             swaps = [t for t in ticks if t.get('instId','').endswith('-USDT-SWAP')]
             active = sorted([t for t in swaps if float(t.get('volCcyQuote') or t.get('vol24h') or 0) > 5000000],
                             key=lambda t: float(t.get('volCcyQuote') or t.get('vol24h') or 0), reverse=True)[:30]
-            self._status(f"{len(active)} 品种分析中..."); self._prog(10)
-            found = 0
-            for i, t in enumerate(active):
+            self._prog(10)
+            selected = list(self._selected_strat_names)
+            total_found = 0
+
+            for si, strat_name in enumerate(selected):
                 if self._cancel_flag:
-                    self._status(f"已取消 (分析 {found} 个)"); self._prog(0); return
-                iid = t['instId']; pct = 10 + int(85*(i+1)/len(active))
-                self._prog(pct); self._status(f"[{i+1}/{len(active)}] {iid}")
-                try:
-                    kls = {}
-                    for bar in ['1D','1H','15m','3m']:
-                        if self._cancel_flag: return
-                        rr = self.okx.get_kline(iid, bar=bar, limit=200)
-                        if isinstance(rr, dict) and rr.get('code')=='0' and rr.get('data'):
-                            kls[bar] = rr['data']
-                    if not kls.get('1D') or not kls.get('1H'): continue
-                    sym = ScannerSymbol(inst_id=iid, last_price=float(t.get('last',0)),
-                                        volume_24h=float(t.get('volCcyQuote') or t.get('vol24h') or 0),
-                                        extra_data={'klines': kls})
+                    self._status(f"已取消"); self._prog(0); return
+                scanner = self._load_strat_scanner(strat_name)
+                if not scanner:
+                    self._add_log(f"⚠ 策略加载失败: {strat_name}")
+                    continue
+                self.scanner = scanner
+                self._status(f"[{si+1}/{len(selected)}] {strat_name} 扫描中..."); self._prog(10)
+                found = 0
+                for i, t in enumerate(active):
+                    if self._cancel_flag:
+                        self._status(f"已取消 (分析 {total_found} 个)"); self._prog(0); return
+                    iid = t['instId']
+                    pct = 10 + int(85 * (i + 1) / len(active))
+                    self._prog(pct)
+                    self._status(f"[{si+1}/{len(selected)}] {iid} [{strat_name[:8]}]")
                     try:
-                        res = self.scanner.scan_symbol(sym)
-                        if isinstance(res, dict):
-                            if res.get('passed', False) or res.get('score',0) >= 60:
-                                found += 1; self._add_res(res)
-                    except Exception as e2:
-                        self._add_log(f"{iid} 分析出错: {e2}")
-                except Exception as e1:
-                    self._add_log(f"{iid} 获取数据失败"); continue
-                time.sleep(0.15)
-            self._status(f"完成！{found} 个机会"); self._prog(100)
-            if found == 0:
+                        kls = {}
+                        for bar in ['1D', '1H', '15m', '3m']:
+                            if self._cancel_flag: return
+                            rr = self.okx.get_kline(iid, bar=bar, limit=200)
+                            if isinstance(rr, dict) and rr.get('code') == '0' and rr.get('data'):
+                                kls[bar] = rr['data']
+                        if not kls.get('1D') or not kls.get('1H'): continue
+                        sym = ScannerSymbol(inst_id=iid, last_price=float(t.get('last', 0)),
+                                            volume_24h=float(t.get('volCcyQuote') or t.get('vol24h') or 0),
+                                            extra_data={'klines': kls})
+                        try:
+                            res = scanner.scan_symbol(sym)
+                            if isinstance(res, dict):
+                                if res.get('passed', False) or res.get('score', 0) >= 60:
+                                    found += 1
+                                    self._add_res(res, strat_name)
+                        except Exception as e2:
+                            self._add_log(f"{iid} 分析出错: {e2}")
+                    except Exception as e1:
+                        self._add_log(f"{iid} 获取数据失败"); continue
+                    time.sleep(0.15)
+                self._add_log(f"━ {strat_name}: {found} 个机会")
+                total_found += found
+
+            self._status(f"完成！{total_found} 个机会"); self._prog(100)
+            if total_found == 0:
                 Clock.schedule_once(lambda dt: self._add_log("未发现符合条件的交易机会"))
         except Exception as e: self._err(f"扫描失败: {e}")
         finally: self.scanning = False
@@ -311,9 +378,9 @@ class App(App):
             self.rlog.text += msg + "\n"
         Clock.schedule_once(_f)
 
-    def _add_res(self, r):
+    def _add_res(self, r, strat_name=None):
         r['scan_time'] = time.strftime("%H:%M:%S")
-        r['strategy'] = self._cur_strat_name
+        r['strategy'] = strat_name or self._cur_strat_name
         self.pool.append(r)
         def _f(dt):
             d = r.get('direction','NEUTRAL')
@@ -330,7 +397,7 @@ class App(App):
             'xiaoyue_boll': '小月期货多周期布林趋势转折',
             'three_min_pullback': '三分钟多周期回调企稳策略',
             'trend_squeeze': '趋势挤压突破前4_30_v2',
-            'AI截面五引擎组合扫描器4_28_v2': 'AI截面五引擎组合扫描器4_28_v2',
+            'AI五引擎合并独立版': 'AI五引擎合并独立版',
         }
         names = []
         for k, v in self._smap.items():
@@ -377,13 +444,13 @@ class App(App):
         self._file_popup.open()
 
     def _show_strat_popup(self, btn):
-        """Show popup with all available strategies to pick from"""
+        """Show popup with multi-select strategies for batch scanning"""
         names = self._list_strats()
         if not names:
             self._pop("提示", "无可用策略"); return
 
         c = BoxLayout(orientation='vertical', padding=dp(8), spacing=dp(4))
-        c.add_widget(L("选择策略", 14, C_TAB, True))
+        c.add_widget(L("多选策略（依次扫描）", 14, C_TAB, True))
         sv = ScrollView(scroll_type=['bars','content'], bar_width=dp(6))
         flist = BoxLayout(orientation='vertical', size_hint_y=None, spacing=dp(2))
         flist.bind(minimum_height=flist.setter('height'))
@@ -392,30 +459,79 @@ class App(App):
                    background_color=(0.12, 0.12, 0.15, 0.97), separator_color=C_TAB, auto_dismiss=False)
 
         for name in names:
-            is_active = (name == self._cur_strat_name)
-            bg = C_TAB if is_active else C_CRD
-            btn_text = f"✓ {name}" if is_active else f"  {name}"
+            is_selected = name in self._selected_strat_names
+            bg = C_TAB if is_selected else C_CRD
+            btn_text = f"✓ {name}" if is_selected else f"  {name}"
             b = Button(text=btn_text, font_size=sp(13), color=C_TXT,
                        background_color=bg, background_normal='',
                        size_hint_y=None, height=dp(46), halign='left')
             b.bind(size=b.setter('text_size'))
             _f(b)
-            b.bind(on_release=lambda x, n=name: self._pick_strat(n, pp))
+            b.bind(on_release=lambda x, n=name, btn=None: self._toggle_strat(n, pp))
             flist.add_widget(b)
         sv.add_widget(flist)
         c.add_widget(sv)
-        c.add_widget(B("关闭", C_BTN, 13, cb=pp.dismiss))
+
+        # bottom row
+        br = BoxLayout(size_hint_y=None, height=dp(44), spacing=dp(4))
+        br.add_widget(B("全选", (0.20, 0.20, 0.25, 1), 12, cb=lambda x: self._sel_all_strat(pp)))
+        br.add_widget(B("清空", (0.20, 0.20, 0.25, 1), 12, cb=lambda x: self._sel_none_strat(pp)))
+        br.add_widget(B("确定", C_BTN, 13, cb=lambda x: self._confirm_strats(pp)))
+        c.add_widget(br)
         pp.open()
 
-    def _pick_strat(self, name, popup):
+    def _toggle_strat(self, name, popup):
+        if name in self._selected_strat_names:
+            self._selected_strat_names.remove(name)
+        else:
+            self._selected_strat_names.append(name)
+        if hasattr(self, '_strat_btn'):
+            n = len(self._selected_strat_names)
+            self._strat_btn.text = f"策略({n}): {self._selected_strat_names[0]}" if n == 1 else f"策略: {n}个已选"
         popup.dismiss()
-        self._cur_strat_name = name
-        self._strat_btn.text = f"策略: {name}"
-        # Load it
-        rev = {v:k for k,v in self._smap.items()}
+        self._show_strat_popup(None)
+
+    def _sel_all_strat(self, popup):
+        self._selected_strat_names = list(self._list_strats())
+        popup.dismiss()
+        self._show_strat_popup(None)
+
+    def _sel_none_strat(self, popup):
+        self._selected_strat_names = []
+        popup.dismiss()
+        self._show_strat_popup(None)
+
+    def _confirm_strats(self, popup):
+        popup.dismiss()
+        if not self._selected_strat_names:
+            self._pop("提示", "请至少选择一个策略")
+            return
+        self._strat_btn.text = f"策略: {len(self._selected_strat_names)}个已选"
+        self._save()
+        self._load_strat_scanner(self._selected_strat_names[0])
+
+    def _load_strat_scanner(self, name):
+        """Load and cache scanner class for a given display name. Returns scanner instance."""
+        if name in self._strat_scanners:
+            return self._strat_scanners[name]
+        rev = {v: k for k, v in self._smap.items()}
         fname = rev.get(name, name)
-        fpath = os.path.join(self.dir, 'strategies', fname+'.py')
-        self._do_load_file(fpath, fname+'.py', silent=True)
+        fpath = os.path.join(self.dir, 'strategies', fname + '.py')
+        try:
+            spec = importlib.util.spec_from_file_location(fname, fpath)
+            if not spec: return None
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            for cls_name in ['OKXHourSwingScanner', 'XiaoYueBollMacdScanner',
+                             'TrendSqueezeBreakoutScannerV3', 'AICrossSectionDualFactorComboScanner',
+                             'ThreeMinuteMultiTimeframePullbackStrategy']:
+                if hasattr(mod, cls_name):
+                    scanner = getattr(mod, cls_name)()
+                    self._strat_scanners[name] = scanner
+                    return scanner
+        except Exception:
+            pass
+        return None
 
     def _do_load_file(self, path, filename, popup=None, silent=False):
         if hasattr(self, '_file_popup') and self._file_popup:
@@ -435,7 +551,10 @@ class App(App):
             if scanner_cls:
                 self.scanner = scanner_cls()
                 self._cur_strat_name = filename.replace('.py','')
-                self._strat_btn.text = f"策略: {self._cur_strat_name}"
+                self._selected_strat_names = [self._cur_strat_name]
+                self._strat_scanners[self._cur_strat_name] = self.scanner
+                self._strat_btn.text = f"策略(1): {self._cur_strat_name}"
+                self._save()
                 if not silent: self._pop("成功", f"已加载: {filename}")
             else:
                 if not silent: self._pop("提示", f"文件中未找到策略类: {filename}")
@@ -459,6 +578,8 @@ class App(App):
         # bottom buttons
         bar = BoxLayout(size_hint_y=None, height=dp(40), spacing=dp(6))
         bar.add_widget(B("清空全部", (0.30, 0.30, 0.35, 1), 12, cb=self._clr_pool))
+        self._pool_mon_btn = B("启用监控", (0.20, 0.55, 0.25, 1), 12, cb=self._toggle_pool_monitor)
+        bar.add_widget(self._pool_mon_btn)
         p.add_widget(bar)
 
         self._refresh_pool_display()
@@ -466,6 +587,13 @@ class App(App):
 
     def _clr_pool(self, btn):
         self.pool = []
+        if self._pool_monitoring:
+            self._pool_monitoring = False
+            if self._pool_monitor_timer:
+                self._pool_monitor_timer.cancel()
+                self._pool_monitor_timer = None
+            self._pool_mon_btn.text = "启用监控"
+            self._pool_mon_btn.background_color = (0.20, 0.55, 0.25, 1)
         self._pool_sel_label.text = "未选中"
         self._pool_selected = None
         self._refresh_pool_display()
@@ -491,7 +619,8 @@ class App(App):
 
         # table header
         hdr = BoxLayout(size_hint_y=None, height=dp(28), spacing=dp(2))
-        cols = [("时间", 0.13), ("交易对", 0.20), ("方向", 0.11), ("评分", 0.10), ("策略来源", 0.20), ("走势预判", 0.16), ("操作", 0.10)]
+        cols = [("时间", 0.12), ("交易对", 0.16), ("方向", 0.10), ("评分", 0.09), ("策略来源", 0.16),
+                ("日", 0.09), ("时", 0.09), ("分", 0.09), ("操作", 0.10)]
         for title, w in cols:
             lbl = Label(text=title, font_size=sp(11), color=C_TAB, bold=True,
                         halign='center', valign='middle', size_hint_x=w)
@@ -511,10 +640,22 @@ class App(App):
             dcolor = C_ACC if d == 'LONG' else (C_RED if d == 'SHORT' else C_SUB)
             arrow = "↑" if d == 'LONG' else ("↓" if d == 'SHORT' else "→")
 
+            # monitoring trend indicators
+            td = r.get('trend_d', '') or '→'
+            th = r.get('trend_h', '') or '→'
+            tm = r.get('trend_m', '') or '→'
+            td_color = C_ACC if '↑' in td else (C_RED if '↓' in td else C_SUB)
+            th_color = C_ACC if '↑' in th else (C_RED if '↓' in th else C_SUB)
+            tm_color = C_ACC if '↑' in tm else (C_RED if '↓' in tm else C_SUB)
+
             row = BoxLayout(size_hint_y=None, height=dp(30), spacing=dp(2))
-            vals = [t, sym, f"{arrow}{d}", score, strategy_src, outlook]
+            vals = [t, sym, f"{arrow}{d}", score, strategy_src, td, th, tm]
             for i, (val, (_, w)) in enumerate(zip(vals, cols[:-1])):
-                color = dcolor if i == 2 else C_TXT
+                if i == 2:      color = dcolor
+                elif i == 5:    color = td_color
+                elif i == 6:    color = th_color
+                elif i == 7:    color = tm_color
+                else:           color = C_TXT
                 lbl = Label(text=val, font_size=sp(10), color=color,
                            halign='center', valign='middle', size_hint_x=w)
                 _f(lbl)
@@ -532,6 +673,86 @@ class App(App):
         if 0 <= idx < len(self.pool):
             del self.pool[idx]
             self._refresh_pool_display()
+
+    def _toggle_pool_monitor(self, btn):
+        if self._pool_monitoring:
+            self._pool_monitoring = False
+            if self._pool_monitor_timer:
+                self._pool_monitor_timer.cancel()
+                self._pool_monitor_timer = None
+            self._pool_mon_btn.text = "启用监控"
+            self._pool_mon_btn.background_color = (0.20, 0.55, 0.25, 1)
+            self._status("池监控已停止")
+        else:
+            if not self.pool:
+                self._pop("提示", "池子为空，请先扫描"); return
+            self._pool_monitoring = True
+            self._pool_mon_btn.text = "停止监控"
+            self._pool_mon_btn.background_color = C_RED
+            self._status("池监控已启动")
+            self._pool_monitor_timer = Clock.schedule_interval(
+                lambda dt: threading.Thread(target=self._pool_monitor_thread, daemon=True).start(), 30)
+
+    def _pool_monitor_thread(self):
+        import pandas as pd
+        if not self._pool_monitoring or not self.pool:
+            return
+        if not self._monitor_lock.acquire(blocking=False):
+            return  # previous monitor still running, skip this round
+        try:
+            self._init_okx()
+            symbols = list(set(r.get('symbol', '') for r in self.pool if r.get('symbol')))
+            if not symbols:
+                return
+
+            for sym in symbols:
+                if not self._pool_monitoring:
+                    return
+                inst_id = sym if '-USDT-SWAP' in sym else f"{sym}-USDT-SWAP"
+                try:
+                    kls = {}
+                    for bar, limit in [('1D', 60), ('1H', 60), ('15m', 60)]:
+                        rr = self.okx.get_kline(inst_id, bar=bar, limit=limit)
+                        if isinstance(rr, dict) and rr.get('code') == '0' and rr.get('data'):
+                            kls[bar] = rr['data']
+                    trend_d = trend_h = trend_m = '→'
+                    if kls.get('1D') and len(kls['1D']) >= 26:
+                        d1 = pd.DataFrame([r[:6] for r in kls['1D'] if len(r) >= 6],
+                                           columns=['ts','o','h','l','c','vol']).astype(float)
+                        if len(d1) >= 26:
+                            e12 = d1['c'].ewm(span=12, adjust=False).mean().iloc[-1]
+                            e26 = d1['c'].ewm(span=26, adjust=False).mean().iloc[-1]
+                            p = d1['c'].iloc[-1]
+                            trend_d = '↑' if p > e12 > e26 else ('↓' if p < e12 < e26 else '→')
+                    if kls.get('1H') and len(kls['1H']) >= 26:
+                        h1 = pd.DataFrame([r[:6] for r in kls['1H'] if len(r) >= 6],
+                                           columns=['ts','o','h','l','c','vol']).astype(float)
+                        if len(h1) >= 26:
+                            e12 = h1['c'].ewm(span=12, adjust=False).mean().iloc[-1]
+                            e26 = h1['c'].ewm(span=26, adjust=False).mean().iloc[-1]
+                            p = h1['c'].iloc[-1]
+                            trend_h = '↑' if p > e12 > e26 else ('↓' if p < e12 < e26 else '→')
+                    if kls.get('15m') and len(kls['15m']) >= 26:
+                        m15 = pd.DataFrame([r[:6] for r in kls['15m'] if len(r) >= 6],
+                                            columns=['ts','o','h','l','c','vol']).astype(float)
+                        if len(m15) >= 26:
+                            e12 = m15['c'].ewm(span=12, adjust=False).mean().iloc[-1]
+                            e26 = m15['c'].ewm(span=26, adjust=False).mean().iloc[-1]
+                            p = m15['c'].iloc[-1]
+                            trend_m = '↑' if p > e12 > e26 else ('↓' if p < e12 < e26 else '→')
+                    for r in self.pool:
+                        if r.get('symbol', '').replace('-USDT-SWAP', '') == sym.replace('-USDT-SWAP', ''):
+                            r['trend_d'] = trend_d
+                            r['trend_h'] = trend_h
+                            r['trend_m'] = trend_m
+                    time.sleep(0.3)
+                except Exception:
+                    continue
+            Clock.schedule_once(lambda dt: self._refresh_pool_display())
+        except Exception:
+            pass
+        finally:
+            self._monitor_lock.release()
 
     # ═══════════════════ Trading Monitor ═══════════════════
     def _trade_mon_page(self):
@@ -551,16 +772,13 @@ class App(App):
         br.add_widget(B("持仓列表", (0.25, 0.45, 0.30, 1), 13, cb=lambda x: self._fetch_positions()))
         p.add_widget(br)
 
-        # trading monitor positions list - also use text-only
+        # positions table
         sv = ScrollView(size_hint_y=1, scroll_type=['bars','content'], bar_width=dp(6))
-        self._tmon_text = Label(text="点击刷新/持仓列表查看数据", font_size=sp(12), color=C_SUB,
-                                halign='left', valign='top', size_hint_y=None, markup=True,
-                                text_size=(dp(370), None))
-        _f(self._tmon_text)
-        self._tmon_text.bind(width=lambda w, v: setattr(w, 'text_size', (v, None)))
-        self._tmon_text.bind(texture_size=self._tmon_text.setter('size'))
-        sv.add_widget(self._tmon_text)
+        self._tmon_list = BoxLayout(orientation='vertical', size_hint_y=None, spacing=dp(2))
+        self._tmon_list.bind(minimum_height=self._tmon_list.setter('height'))
+        sv.add_widget(self._tmon_list)
         p.add_widget(sv)
+        self._restore_tmon_display()
         return p
 
     def _refresh_trade_mon(self):
@@ -582,12 +800,15 @@ class App(App):
                     bal_usdt = d.get('details', [])
                     usdt = next((x for x in bal_usdt if x.get('ccy') == 'USDT'), {})
                     avail = usdt.get('availEq', '0')
-                    Clock.schedule_once(lambda dt: setattr(self._tmon_balance, 'text', f"可用: {avail} USDT"))
-                    Clock.schedule_once(lambda dt: setattr(self._tmon_equity, 'text', f"总权益: {eq} USDT"))
+                    self._tmon_balance_text = f"可用: {avail} USDT"
+                    self._tmon_equity_text = f"总权益: {eq} USDT"
                 else:
-                    Clock.schedule_once(lambda dt: setattr(self._tmon_balance, 'text', "无余额数据"))
+                    self._tmon_balance_text = "无余额数据"
+                    self._tmon_equity_text = "权益: ----"
             else:
-                Clock.schedule_once(lambda dt: setattr(self._tmon_balance, 'text', "获取余额失败"))
+                self._tmon_balance_text = "获取余额失败"
+                self._tmon_equity_text = "权益: ----"
+            Clock.schedule_once(lambda dt: self._restore_tmon_display())
 
             # positions
             self._fetch_positions_thread()
@@ -607,27 +828,74 @@ class App(App):
             pos = self.okx.get_positions()
             def update(dt):
                 if isinstance(pos, dict) and pos.get('code') == '0':
-                    data = pos.get('data', [])
-                    if not data:
-                        self._tmon_text.text = "暂无持仓"
-                        return
-                    lines = []
-                    for p in data:
-                        iid = p.get('instId', '?')
-                        side = "多" if p.get('posSide') == 'long' else "空"
-                        qty = p.get('pos', '0')
-                        pnl = float(p.get('upl', 0))
-                        lev = p.get('lever', '1')
-                        avg_px = p.get('avgPx', '0')
-                        mark = p.get('markPx', '0')
-                        sign = "+" if pnl >= 0 else ""
-                        lines.append(f"[b]{iid} {side}[/b]  {qty}张 {lev}x | 均价{avg_px} 标记{mark} | 盈亏 [b]{sign}{pnl}[/b] USDT")
-                    self._tmon_text.text = "\n".join(lines)
+                    self.positions_data = pos.get('data', [])
+                    self._refresh_positions_display()
                 else:
-                    self._tmon_text.text = "获取持仓失败"
+                    self.positions_data = []
+                    self._refresh_positions_display()
             Clock.schedule_once(update)
         except Exception as e:
+            self.positions_data = []
+            Clock.schedule_once(lambda dt: self._refresh_positions_display())
             Clock.schedule_once(lambda dt: self._pop("错误", str(e)))
+
+    def _refresh_positions_display(self):
+        if not hasattr(self, '_tmon_list') or not self._tmon_list:
+            return
+        self._tmon_list.clear_widgets()
+        if not self.positions_data:
+            self._tmon_list.add_widget(L("暂无持仓", 12, C_SUB))
+            return
+
+        # table header
+        hdr = BoxLayout(size_hint_y=None, height=dp(28), spacing=dp(2))
+        cols = [("交易对", 0.20), ("方向", 0.10), ("张数", 0.10), ("杠杆", 0.08),
+                ("均价", 0.15), ("标记价", 0.15), ("未实现盈亏", 0.22)]
+        for title, w in cols:
+            lbl = Label(text=title, font_size=sp(11), color=C_TAB, bold=True,
+                        halign='center', valign='middle', size_hint_x=w)
+            _f(lbl)
+            hdr.add_widget(lbl)
+        self._tmon_list.add_widget(hdr)
+
+        # data rows
+        for p in self.positions_data:
+            iid = p.get('instId', '?').replace('-USDT-SWAP', '').replace('-USDT', '')
+            side = p.get('posSide', 'long')
+            pos_qty = float(p.get('pos', 0))
+            # 单向持仓模式 posSide='net'，用 pos 正负判断方向
+            if side == 'net':
+                is_long = pos_qty > 0
+            else:
+                is_long = side == 'long'
+            side_cn = "多" if is_long else "空"
+            arrow = "↑" if is_long else "↓"
+            qty = str(abs(int(pos_qty)))
+            lev = p.get('lever', '1')
+            avg_px = p.get('avgPx', '0')
+            mark_px = p.get('markPx', '0')
+            pnl = float(p.get('upl', 0))
+            sign = "+" if pnl >= 0 else ""
+            pnl_color = C_ACC if pnl >= 0 else C_RED
+            side_color = C_ACC if is_long else C_RED
+
+            row = BoxLayout(size_hint_y=None, height=dp(32), spacing=dp(2))
+            vals = [iid, f"{arrow}{side_cn}", qty, f"{lev}x", avg_px, mark_px, f"{sign}{pnl:.2f}"]
+            for i, (val, (_, w)) in enumerate(zip(vals, cols)):
+                color = side_color if i == 1 else (pnl_color if i == 6 else C_TXT)
+                lbl = Label(text=val, font_size=sp(11), color=color,
+                           halign='center', valign='middle', size_hint_x=w)
+                _f(lbl)
+                row.add_widget(lbl)
+            self._tmon_list.add_widget(row)
+
+    def _restore_tmon_display(self):
+        """Restore cached account info and positions to widgets (survives tab switches)"""
+        if hasattr(self, '_tmon_balance') and self._tmon_balance:
+            self._tmon_balance.text = getattr(self, '_tmon_balance_text', "账户: ----")
+        if hasattr(self, '_tmon_equity') and self._tmon_equity:
+            self._tmon_equity.text = getattr(self, '_tmon_equity_text', "权益: ----")
+        self._refresh_positions_display()
 
     # ═══════════════════ Data ═══════════════════
     def _data_page(self):
@@ -683,7 +951,9 @@ class App(App):
     def _save(self):
         try:
             os.makedirs(os.path.dirname(self.cfg_path), exist_ok=True)
-            self.cfg['interval'] = self.tm.text
+            if hasattr(self, 'tm') and self.tm:
+                self.cfg['interval'] = self.tm.text
+            self.cfg['selected_strategies'] = list(self._selected_strat_names)
             with open(self.cfg_path, 'w', encoding='utf-8') as f:
                 json.dump(self.cfg, f, ensure_ascii=False, indent=2)
             return True
