@@ -108,6 +108,9 @@ class App(App):
             'three_min_pullback': '三分钟多周期回调企稳策略',
             'trend_squeeze': '趋势挤压突破前4_30_v2',
             'AI五引擎合并独立版': 'AI五引擎合并独立版',
+            'AI五引擎合并独立版5.9': 'AI五引擎合并独立版v5.9',
+            'xiaoyue_boll_5.9': '小月期货多周期布林v5.9',
+            'trend_squeeze_5.9': '趋势挤压突破前v5.9',
         }
         self._pool_monitoring = False
         self._pool_monitor_timer = None
