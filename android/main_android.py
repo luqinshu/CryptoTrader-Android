@@ -183,14 +183,12 @@ class App(App):
         sr.add_widget(B("保存", (0.20, 0.20, 0.25, 1), 12, cb=lambda x: self._pop("配置", "已保存" if self._save() else "失败")))
         p.add_widget(sr)
 
-        # row 2: strategy
+        # row 2: strategy picker button -> popup
         sr2 = BoxLayout(size_hint_y=None, height=dp(40), spacing=dp(4))
-        self.ssp = Spinner(text='OKX小时线波段共振策略', values=self._list_strats(),
-                           size_hint_x=0.5, background_color=C_CRD, color=C_TXT, font_size=sp(12))
-        _f(self.ssp)
-        sr2.add_widget(self.ssp)
-        sr2.add_widget(B("加载", C_BTN, 12, cb=self._load_strat))
-        sr2.add_widget(B("文件", (0.25, 0.45, 0.30, 1), 12, cb=self._load_from_file))
+        self._cur_strat_name = 'OKX小时线波段共振策略'
+        self._strat_btn = B(f"策略: {self._cur_strat_name}", (0.20, 0.25, 0.30, 1), 12, cb=self._show_strat_popup)
+        sr2.add_widget(self._strat_btn)
+        sr2.add_widget(B("从文件加载", (0.25, 0.45, 0.30, 1), 12, cb=self._load_from_file))
         p.add_widget(sr2)
 
         # row 3: interval
@@ -377,9 +375,51 @@ class App(App):
         c.add_widget(B("关闭", C_BTN, 13, cb=self._file_popup.dismiss))
         self._file_popup.open()
 
-    def _do_load_file(self, path, filename, popup=None):
+    def _show_strat_popup(self, btn):
+        """Show popup with all available strategies to pick from"""
+        names = self._list_strats()
+        if not names:
+            self._pop("提示", "无可用策略"); return
+
+        c = BoxLayout(orientation='vertical', padding=dp(8), spacing=dp(4))
+        c.add_widget(L("选择策略", 14, C_TAB, True))
+        sv = ScrollView(scroll_type=['bars','content'], bar_width=dp(6))
+        flist = BoxLayout(orientation='vertical', size_hint_y=None, spacing=dp(2))
+        flist.bind(minimum_height=flist.setter('height'))
+
+        pp = Popup(title="策略列表", content=c, size_hint=(0.88, 0.65),
+                   background_color=(0.12, 0.12, 0.15, 0.97), separator_color=C_TAB, auto_dismiss=False)
+
+        for name in names:
+            is_active = (name == self._cur_strat_name)
+            bg = C_TAB if is_active else C_CRD
+            btn_text = f"✓ {name}" if is_active else f"  {name}"
+            b = Button(text=btn_text, font_size=sp(13), color=C_TXT,
+                       background_color=bg, background_normal='',
+                       size_hint_y=None, height=dp(46), halign='left')
+            b.bind(size=b.setter('text_size'))
+            _f(b)
+            b.bind(on_release=lambda x, n=name: self._pick_strat(n, pp))
+            flist.add_widget(b)
+        sv.add_widget(flist)
+        c.add_widget(sv)
+        c.add_widget(B("关闭", C_BTN, 13, cb=pp.dismiss))
+        pp.open()
+
+    def _pick_strat(self, name, popup):
+        popup.dismiss()
+        self._cur_strat_name = name
+        self._strat_btn.text = f"策略: {name}"
+        # Load it
+        rev = {v:k for k,v in self._smap.items()}
+        fname = rev.get(name, name)
+        fpath = os.path.join(self.dir, 'strategies', fname+'.py')
+        self._do_load_file(fpath, fname+'.py', silent=True)
+
+    def _do_load_file(self, path, filename, popup=None, silent=False):
         if hasattr(self, '_file_popup') and self._file_popup:
             self._file_popup.dismiss()
+        if popup: popup.dismiss()
         try:
             name = filename.replace('.py', '')
             spec = importlib.util.spec_from_file_location(name, path)
@@ -393,30 +433,13 @@ class App(App):
                     scanner_cls = getattr(mod, cls_name); break
             if scanner_cls:
                 self.scanner = scanner_cls()
-                self._pop("成功", f"已加载: {filename}")
+                self._cur_strat_name = filename.replace('.py','')
+                self._strat_btn.text = f"策略: {self._cur_strat_name}"
+                if not silent: self._pop("成功", f"已加载: {filename}")
             else:
-                self._pop("提示", f"文件中未找到策略类: {filename}")
+                if not silent: self._pop("提示", f"文件中未找到策略类: {filename}")
         except Exception as e:
-            self._pop("错误", f"加载失败: {e}")
-        name = self.ssp.text
-        if not name: return
-        # reverse map display -> filename
-        rev = {v:k for k,v in self._smap.items()}
-        fname = rev.get(name, name)
-        fpath = os.path.join(self.dir, 'strategies', fname+'.py')
-        if not os.path.exists(fpath):
-            self._pop("错误", f"文件未找到: {fname}.py"); return
-        try:
-            spec = importlib.util.spec_from_file_location(fname, fpath)
-            if not spec: self._pop("错误", "策略加载失败"); return
-            mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
-            for cls_name in ['OKXHourSwingScanner', 'XiaoYueBollMacdScanner',
-                             'TrendSqueezeBreakoutScannerV3', 'AICrossSectionDualFactorComboScanner',
-                             'ThreeMinuteMultiTimeframePullbackStrategy']:
-                if hasattr(mod, cls_name):
-                    self.scanner = getattr(mod, cls_name)(); self._pop("成功", f"已加载: {name}"); return
-            self._pop("提示", "策略类未找到")
-        except Exception as e: self._pop("错误", f"加载失败: {e}")
+            if not silent: self._pop("错误", f"加载失败: {e}")
 
     # ═══════════════════ Pool ═══════════════════
     def _pool_page(self):
