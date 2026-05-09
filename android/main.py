@@ -95,8 +95,6 @@ class App(App):
 
         # title
         tb = BoxLayout(size_hint_y=None, height=dp(48))
-        with tb.canvas.before: Color(*C_OFF); self._tbg = Rectangle(pos=tb.pos, size=tb.size)
-        tb.bind(pos=lambda i,v: setattr(self._tbg,'pos',v), size=lambda i,v: setattr(self._tbg,'size',v))
         tb.add_widget(L("CryptoScanner Pro", 18, C_TAB, True))
         root.add_widget(tb)
 
@@ -316,9 +314,7 @@ class App(App):
 
     def _add_res(self, r):
         def _f(dt):
-            bx = BoxLayout(orientation='vertical', size_hint_y=None, height=dp(52), spacing=dp(2))
-            with bx.canvas.before: Color(*C_CRD); bx._b = Rectangle(pos=bx.pos, size=bx.size)
-            bx.bind(pos=lambda i,v: setattr(bx._b,'pos',v), size=lambda i,v: setattr(bx._b,'size',v))
+            bx = BoxLayout(orientation='vertical', size_hint_y=None, height=dp(52), spacing=dp(2), padding=[dp(6),dp(4)])
             d = r.get('direction','NEUTRAL'); dc = C_ACC if d=='LONG' else (C_RED if d=='SHORT' else C_SUB)
             h = BoxLayout(size_hint_y=None, height=dp(22))
             h.add_widget(L(r.get('symbol','?'), 12, C_TXT, True))
@@ -550,9 +546,7 @@ class App(App):
                         avg_px = p.get('avgPx', '0')
                         mark = p.get('markPx', '0')
                         c = C_ACC if float(pnl) >= 0 else C_RED
-                        row = BoxLayout(orientation='vertical', size_hint_y=None, height=dp(64), spacing=dp(2))
-                        with row.canvas.before: Color(*C_CRD); row._b = Rectangle(pos=row.pos, size=row.size)
-                        row.bind(pos=lambda i,v: setattr(row._b,'pos',v), size=lambda i,v: setattr(row._b,'size',v))
+                        row = BoxLayout(orientation='vertical', size_hint_y=None, height=dp(64), spacing=dp(2), padding=[dp(6),dp(4)])
                         h = BoxLayout(size_hint_y=None, height=dp(24))
                         h.add_widget(L(f"{iid} {side}", 12, C_TXT, True))
                         h.add_widget(L(f"{qty}张 {lev}x", 12, C_TXT))
