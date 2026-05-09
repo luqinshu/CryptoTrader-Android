@@ -108,9 +108,9 @@ class App(App):
             'three_min_pullback': '三分钟多周期回调企稳策略',
             'trend_squeeze': '趋势挤压突破前4_30_v2',
             'AI五引擎合并独立版': 'AI五引擎合并独立版',
-            'AI五引擎合并独立版5.9': 'AI五引擎合并独立版v5.9',
-            'xiaoyue_boll_5.9': '小月期货多周期布林v5.9',
-            'trend_squeeze_5.9': '趋势挤压突破前v5.9',
+            'AI五引擎合并独立版59': 'AI五引擎合并独立版v5.9',
+            'xiaoyue_boll_59': '小月期货多周期布林v5.9',
+            'trend_squeeze_59': '趋势挤压突破前v5.9',
         }
         self._pool_monitoring = False
         self._pool_monitor_timer = None
@@ -436,8 +436,11 @@ class App(App):
     def _list_strats(self):
         names = []
         for k, v in self._smap.items():
-            if os.path.exists(os.path.join(self.dir, 'strategies', k+'.py')):
-                names.append(v)
+            try:
+                if importlib.util.find_spec(f'strategies.{k}'):
+                    names.append(v)
+            except Exception:
+                pass
         return names or ['OKX小时线波段共振策略']
 
     def _load_strat(self, btn):
@@ -556,12 +559,25 @@ class App(App):
             return self._strat_scanners[name]
         rev = {v: k for k, v in self._smap.items()}
         fname = rev.get(name, name)
-        fpath = os.path.join(self.dir, 'strategies', fname + '.py')
+        mod = None
+        # try module import first (works on Android where .py may be compiled)
         try:
-            spec = importlib.util.spec_from_file_location(fname, fpath)
-            if not spec: return None
-            mod = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(mod)
+            mod = importlib.import_module(f'strategies.{fname}')
+        except Exception:
+            pass
+        # fallback: file-based load for desktop dev
+        if mod is None:
+            fpath = os.path.join(self.dir, 'strategies', fname + '.py')
+            try:
+                spec = importlib.util.spec_from_file_location(fname, fpath)
+                if spec:
+                    mod = importlib.util.module_from_spec(spec)
+                    spec.loader.exec_module(mod)
+            except Exception:
+                pass
+        if mod is None:
+            return None
+        try:
             for cls_name in ['OKXHourSwingScanner', 'XiaoYueBollMacdScanner',
                              'TrendSqueezeBreakoutScannerV3', 'AICrossSectionDualFactorComboScanner',
                              'ThreeMinuteMultiTimeframePullbackStrategy']:
