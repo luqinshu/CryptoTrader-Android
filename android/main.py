@@ -145,11 +145,25 @@ class App(App):
         c.add_widget(L("OKX API 配置", 16, C_TAB, True))
         c.add_widget(L("仅保存在本地，App重启自动加载", 12, C_SUB))
 
+        def _add_row(label, field):
+            row = BoxLayout(size_hint_y=None, height=dp(52), spacing=dp(4))
+            row.add_widget(field)
+            pb = Button(text="粘贴", font_size=sp(11), color=C_TXT,
+                        background_color=(0.25, 0.25, 0.30, 1), background_normal='',
+                        size_hint_x=None, width=dp(52))
+            _f(pb)
+            pb.bind(on_release=lambda x, f=field: self._paste_to(f))
+            row.add_widget(pb)
+            c.add_widget(row)
+
         ak = TI("API Key", self.cfg.get('api_key',''))
-        sk = TI("Secret Key", self.cfg.get('secret_key',''), pw=True)
-        ph = TI("Passphrase", self.cfg.get('passphrase',''), pw=True)
+        sk = TI("Secret Key", self.cfg.get('secret_key',''))
+        ph = TI("Passphrase", self.cfg.get('passphrase',''))
         px = TI("代理(可选)", self.cfg.get('proxy_url',''))
-        c.add_widget(ak); c.add_widget(sk); c.add_widget(ph); c.add_widget(px)
+        _add_row("API Key", ak)
+        _add_row("Secret Key", sk)
+        _add_row("Passphrase", ph)
+        _add_row("代理", px)
 
         bb = BoxLayout(size_hint_y=None, height=dp(52), spacing=dp(8))
         bb.add_widget(B("测试连接", (0.40, 0.40, 0.25, 1), 13, cb=lambda x: self._test(ak.text, sk.text, ph.text, px.text)))
@@ -166,6 +180,15 @@ class App(App):
             self._status("API 已保存")
         bb.children[0].bind(on_release=save)  # "保存" button
         pp.open()
+
+    def _paste_to(self, field):
+        try:
+            from kivy.core.clipboard import Clipboard
+            text = Clipboard.get('text/plain') or Clipboard.get()
+            if text:
+                field.text = text
+        except Exception:
+            pass
 
     def _test(self, k, s, p, x):
         if not k or not s:
