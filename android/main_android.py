@@ -208,8 +208,9 @@ class App(App):
         # results log (scrollable, fills most space)
         sv = ScrollView(size_hint_y=1, scroll_type=['bars','content'], bar_width=dp(6))
         self.rlog = Label(text="", font_size=sp(11), color=C_TXT, halign='left', valign='top',
-                          size_hint_y=None, markup=True)
+                          size_hint_y=None, markup=True, text_size=(dp(370), None))
         _f(self.rlog)
+        self.rlog.bind(width=lambda w, v: setattr(w, 'text_size', (v, None)))
         self.rlog.bind(texture_size=self.rlog.setter('size'))
         sv.add_widget(self.rlog)
         p.add_widget(sv)
@@ -477,8 +478,10 @@ class App(App):
         # trading monitor positions list - also use text-only
         sv = ScrollView(size_hint_y=1, scroll_type=['bars','content'], bar_width=dp(6))
         self._tmon_text = Label(text="点击刷新/持仓列表查看数据", font_size=sp(12), color=C_SUB,
-                                halign='left', valign='top', size_hint_y=None, markup=True)
+                                halign='left', valign='top', size_hint_y=None, markup=True,
+                                text_size=(dp(370), None))
         _f(self._tmon_text)
+        self._tmon_text.bind(width=lambda w, v: setattr(w, 'text_size', (v, None)))
         self._tmon_text.bind(texture_size=self._tmon_text.setter('size'))
         sv.add_widget(self._tmon_text)
         p.add_widget(sv)
