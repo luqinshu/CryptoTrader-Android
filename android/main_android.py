@@ -467,6 +467,8 @@ class App(App):
         self._pool_count.text = "共 0 条记录"
 
     def _refresh_pool_display(self):
+        if not hasattr(self, '_pool_text') or not self._pool_text:
+            return
         if not self.pool:
             self._pool_text.text = "暂无数据"
             self._pool_count.text = "共 0 条记录"
@@ -486,7 +488,8 @@ class App(App):
                 line = f"[{t}] {line}"
             lines.append(line)
         self._pool_text.text = "\n".join(lines)
-        self._pool_count.text = f"共 {len(self.pool)} 条记录 (最新优先)"
+        if hasattr(self, '_pool_count') and self._pool_count:
+            self._pool_count.text = f"共 {len(self.pool)} 条记录 (最新优先)"
 
     # ═══════════════════ Trading Monitor ═══════════════════
     def _trade_mon_page(self):
