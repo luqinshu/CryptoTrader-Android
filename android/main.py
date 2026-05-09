@@ -61,7 +61,8 @@ def L(text, s=14, c=C_TXT, b=False):
     l.bind(size=l.setter('text_size')); _f(l); return l
 
 def B(text, bg=C_BTN, s=14, cb=None):
-    btn = Button(text=text, font_size=sp(s), background_color=bg, color=C_TXT, background_normal='')
+    btn = Button(text=text, font_size=sp(s), background_color=bg, color=C_TXT,
+                 background_normal='', size_hint_y=None, height=dp(48))
     _f(btn)
     if cb: btn.bind(on_release=cb)
     return btn
@@ -335,29 +336,30 @@ class App(App):
         self._do_load_file(fpath, fname+'.py')
 
     def _load_from_file(self, btn):
-        """Open file browser to select a .py strategy file"""
         strat_dir = os.path.join(self.dir, 'strategies')
-        # List all .py files in strategies dir
         files = sorted(glob.glob(os.path.join(strat_dir, '*.py')))
-        display = [os.path.basename(f) for f in files if not os.path.basename(f).startswith('_')]
-        
-        if not display:
-            self._pop("提示", "strategies 目录下无策略文件")
-            return
+        display = [(os.path.basename(f), f) for f in files if not os.path.basename(f).startswith('_')]
 
-        c = BoxLayout(orientation='vertical', padding=dp(8), spacing=dp(4))
-        c.add_widget(L("选择策略文件:", 14, C_TAB, True))
+        if not display:
+            self._pop("提示", "无可用策略文件"); return
+
+        c = BoxLayout(orientation='vertical', padding=dp(8), spacing=dp(6))
+        c.add_widget(L("选择策略文件", 14, C_TAB, True))
         sv = ScrollView()
-        flist = BoxLayout(orientation='vertical', size_hint_y=None, spacing=dp(2))
+        flist = BoxLayout(orientation='vertical', size_hint_y=None, spacing=dp(4))
         flist.bind(minimum_height=flist.setter('height'))
-        for fn in display:
-            fp = os.path.join(strat_dir, fn)
-            flist.add_widget(B(fn, C_CRD, 12, cb=lambda x, p=fp, n=fn: self._do_load_file(p, n)))
+        for fn, fp in display:
+            btn = Button(text=fn, font_size=sp(13), color=C_TXT,
+                         background_color=C_CRD, background_normal='',
+                         size_hint_y=None, height=dp(48))
+            _f(btn)
+            btn.bind(on_release=lambda x, p=fp, n=fn: self._do_load_file(p, n))
+            flist.add_widget(btn)
         sv.add_widget(flist)
         c.add_widget(sv)
 
-        pp = Popup(title="加载策略文件", content=c, size_hint=(0.9, 0.75),
-                   background_color=(0.12, 0.12, 0.15, 0.97), separator_color=C_TAB)
+        pp = Popup(title="加载策略文件", content=c, size_hint=(0.88, 0.7),
+                   background_color=(0.12, 0.12, 0.15, 0.97), separator_color=C_TAB, auto_dismiss=True)
         c.add_widget(B("关闭", C_BTN, 13, cb=pp.dismiss))
         pp.open()
 
@@ -497,7 +499,8 @@ class App(App):
                       background_color=(0,0,0,0), foreground_color=C_TXT, size_hint_y=1)
         _f(l); c.add_widget(l)
         b = Button(text="关闭", size_hint_y=None, height=dp(40),
-                   background_color=C_BTN, color=C_TXT); _f(b); c.add_widget(b)
+                   background_color=C_BTN, color=C_TXT)
+        _f(b); c.add_widget(b)
         pp = Popup(title=title, content=c, size_hint=(0.85, 0.45),
                    background_color=(0.15, 0.15, 0.18, 0.95), separator_color=C_TAB)
         b.bind(on_release=pp.dismiss); pp.open()
