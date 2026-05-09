@@ -290,10 +290,15 @@ class App(App):
                     sym = ScannerSymbol(inst_id=iid, last_price=float(t.get('last',0)),
                                         volume_24h=float(t.get('volCcyQuote') or t.get('vol24h') or 0),
                                         extra_data={'klines': kls})
-                    res = self.scanner.scan_symbol(sym)
-                    if res.get('passed', False) or res.get('score',0) >= 60:
-                        found += 1; self._add_res(res); self.pool.append(res)
-                except Exception: continue
+                    try:
+                        res = self.scanner.scan_symbol(sym)
+                        if isinstance(res, dict):
+                            if res.get('passed', False) or res.get('score',0) >= 60:
+                                found += 1; self._add_res(res); self.pool.append(res)
+                    except Exception as e2:
+                        self._add_log(f"{iid} 分析出错: {e2}")
+                except Exception as e1:
+                    self._add_log(f"{iid} 获取数据失败"); continue
                 time.sleep(0.15)
             self._status(f"完成！{found} 个机会"); self._prog(100)
             if found == 0:
