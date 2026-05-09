@@ -9,7 +9,7 @@ logging.getLogger('requests').setLevel(logging.WARNING)
 from kivy.config import Config
 Config.set('graphics', 'width', '390')
 Config.set('graphics', 'height', '844')
-Config.set('graphics', 'resizable', False)
+Config.set('graphics', 'resizable', True)
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -79,7 +79,6 @@ def TI(hint='', text='', pw=False):
 
 class App(App):
     def build(self):
-        Window.minimum_width, Window.minimum_height = 320, 480
         Window.softinput_mode = 'below_target'
         self.dir = os.path.dirname(os.path.abspath(__file__))
         self.cfg_path = os.path.join(self.dir, "app_config.json")
@@ -211,7 +210,7 @@ class App(App):
         p.add_widget(self.st)
 
         # results log (scrollable, fills most space)
-        sv = ScrollView(size_hint_y=1)
+        sv = ScrollView(size_hint_y=1, scroll_type=['bars', 'content'], bar_width=dp(6))
         self.rbox = BoxLayout(orientation='vertical', size_hint_y=None, spacing=dp(3))
         self.rbox.bind(minimum_height=self.rbox.setter('height'))
         sv.add_widget(self.rbox)
@@ -359,7 +358,7 @@ class App(App):
 
         c = BoxLayout(orientation='vertical', padding=dp(8), spacing=dp(6))
         c.add_widget(L("选择策略文件", 14, C_TAB, True))
-        sv = ScrollView(size_hint_y=1)
+        sv = ScrollView(size_hint_y=1, scroll_type=['bars', 'content'], bar_width=dp(6))
         flist = BoxLayout(orientation='vertical', size_hint_y=None, spacing=dp(4))
         flist.bind(minimum_height=flist.setter('height'))
 
@@ -423,7 +422,7 @@ class App(App):
     def _pool_page(self):
         p = BoxLayout(orientation='vertical', padding=dp(10), spacing=dp(8))
         p.add_widget(L("交易池 - 扫描结果汇集", 15, C_TAB, True))
-        sv = ScrollView(size_hint_y=1)
+        sv = ScrollView(size_hint_y=1, scroll_type=['bars', 'content'], bar_width=dp(6))
         self.pc = BoxLayout(orientation='vertical', size_hint_y=None, spacing=dp(3))
         self.pc.bind(minimum_height=self.pc.setter('height'))
         if not self.pool: self.pc.add_widget(L("暂无数据, 扫描后自动汇集", 12, C_SUB))
@@ -457,7 +456,7 @@ class App(App):
         p.add_widget(br)
 
         # positions list
-        sv = ScrollView(size_hint_y=1)
+        sv = ScrollView(size_hint_y=1, scroll_type=['bars', 'content'], bar_width=dp(6))
         self._tmon_list = BoxLayout(orientation='vertical', size_hint_y=None, spacing=dp(3))
         self._tmon_list.bind(minimum_height=self._tmon_list.setter('height'))
         self._tmon_list.add_widget(L("点击刷新/持仓列表查看数据", 12, C_SUB))
@@ -553,7 +552,7 @@ class App(App):
         _f(self.di); r.add_widget(self.di)
         r.add_widget(B("下载K线", C_BTN, 13, cb=lambda x: self._pop("数据库", "开发中")))
         p.add_widget(r)
-        sv = ScrollView(size_hint_y=1)
+        sv = ScrollView(size_hint_y=1, scroll_type=['bars', 'content'], bar_width=dp(6))
         self.dc = BoxLayout(orientation='vertical', size_hint_y=None, spacing=dp(3))
         self.dc.bind(minimum_height=self.dc.setter('height'))
         self.dc.add_widget(L("暂无数据", 12, C_SUB))
