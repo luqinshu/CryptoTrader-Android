@@ -2735,7 +2735,6 @@ try:
 except Exception:
     xgb = None
     _HAS_XGB = False
-    logger.warning("[XGBoost策略] xgboost 不可用，将使用线性回退。安装: pip install xgboost")
 
 try:
     from src.scanner.base_scanner import BaseScannerStrategy, ScanCondition
