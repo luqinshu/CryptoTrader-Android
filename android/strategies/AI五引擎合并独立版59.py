@@ -3770,7 +3770,13 @@ def _to_df(rows):
     else:
         clean = [r[:6] for r in (rows or []) if isinstance(r,(list,tuple)) and len(r)>=6]
         if not clean: return pd.DataFrame(columns=["ts","o","h","l","c","vol"])
-        df = pd.DataFrame(clean, columns=["ts","o","h","l","c","vol"])
+        try:
+            df = pd.DataFrame(clean, columns=["ts","o","h","l","c","vol"])
+            for col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors='coerce')
+        except Exception:
+            arr = np.array(clean, dtype=np.float64)
+            df = pd.DataFrame(arr, columns=["ts","o","h","l","c","vol"])
     for c in ["ts","o","h","l","c","vol"]:
         if c in df.columns: df[c] = pd.to_numeric(df[c], errors="coerce")
     return df.dropna(subset=["ts","o","h","l","c"]).fillna({"vol":0}).sort_values("ts").drop_duplicates("ts",keep="last").reset_index(drop=True)

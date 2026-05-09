@@ -34,11 +34,18 @@ def _to_df(klines) -> pd.DataFrame:
     valid = [r[:6] for r in klines if isinstance(r, (list, tuple)) and len(r) >= 6]
     if not valid:
         return pd.DataFrame(columns=['ts', 'o', 'h', 'l', 'c', 'vol'])
-    df = pd.DataFrame(valid, columns=['ts', 'o', 'h', 'l', 'c', 'vol'])
-    for col in df.columns:
-        df[col] = pd.to_numeric(df[col], errors='coerce')
-    df = df.dropna(subset=['ts', 'o', 'h', 'l', 'c'])
-    df['vol'] = df['vol'].fillna(0.0)
+    try:
+        df = pd.DataFrame(valid, columns=['ts', 'o', 'h', 'l', 'c', 'vol'])
+        for col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+        df = df.dropna(subset=['ts', 'o', 'h', 'l', 'c'])
+        df['vol'] = df['vol'].fillna(0.0)
+    except Exception:
+        # fallback for ARM numpy dtype issues
+        arr = np.array(valid, dtype=np.float64)
+        df = pd.DataFrame(arr, columns=['ts', 'o', 'h', 'l', 'c', 'vol'])
+        df = df.dropna(subset=['ts', 'o', 'h', 'l', 'c'])
+        df['vol'] = df['vol'].fillna(0.0)
     return df.sort_values('ts').drop_duplicates('ts', keep='last').reset_index(drop=True)
 
 
