@@ -57,7 +57,8 @@ def _f(w):
     if FN: w.font_name = FN
 
 def L(text, s=14, c=C_TXT, b=False):
-    l = Label(text=text, font_size=sp(s), color=c, bold=b, halign='left', valign='middle')
+    l = Label(text=text, font_size=sp(s), color=c, bold=b, halign='left', valign='middle',
+              size_hint_y=None, height=dp(s+10))
     l.bind(size=l.setter('text_size')); _f(l); return l
 
 def B(text, bg=C_BTN, s=14, cb=None):
@@ -210,7 +211,7 @@ class App(App):
 
         # results
         p.add_widget(L("扫描结果", 15, C_TAB, True))
-        sv = ScrollView()
+        sv = ScrollView(size_hint_y=1)
         self.rbox = BoxLayout(orientation='vertical', size_hint_y=None, spacing=dp(3))
         self.rbox.bind(minimum_height=self.rbox.setter('height'))
         sv.add_widget(self.rbox)
@@ -345,7 +346,7 @@ class App(App):
 
         c = BoxLayout(orientation='vertical', padding=dp(8), spacing=dp(6))
         c.add_widget(L("选择策略文件", 14, C_TAB, True))
-        sv = ScrollView()
+        sv = ScrollView(size_hint_y=1)
         flist = BoxLayout(orientation='vertical', size_hint_y=None, spacing=dp(4))
         flist.bind(minimum_height=flist.setter('height'))
 
@@ -409,7 +410,7 @@ class App(App):
     def _pool_page(self):
         p = BoxLayout(orientation='vertical', padding=dp(10), spacing=dp(8))
         p.add_widget(L("交易池 - 扫描结果汇集", 15, C_TAB, True))
-        sv = ScrollView()
+        sv = ScrollView(size_hint_y=1)
         self.pc = BoxLayout(orientation='vertical', size_hint_y=None, spacing=dp(3))
         self.pc.bind(minimum_height=self.pc.setter('height'))
         if not self.pool: self.pc.add_widget(L("暂无数据, 扫描后自动汇集", 12, C_SUB))
@@ -434,7 +435,7 @@ class App(App):
         _f(self.mi); r.add_widget(self.mi)
         r.add_widget(B("添加", C_BTN, 13, cb=self._add_mon))
         p.add_widget(r)
-        sv = ScrollView()
+        sv = ScrollView(size_hint_y=1)
         self.mc = BoxLayout(orientation='vertical', size_hint_y=None, spacing=dp(3))
         self.mc.bind(minimum_height=self.mc.setter('height'))
         self._refresh_mon_view()
@@ -474,7 +475,7 @@ class App(App):
         _f(self.di); r.add_widget(self.di)
         r.add_widget(B("下载K线", C_BTN, 13, cb=lambda x: self._pop("数据库", "开发中")))
         p.add_widget(r)
-        sv = ScrollView()
+        sv = ScrollView(size_hint_y=1)
         self.dc = BoxLayout(orientation='vertical', size_hint_y=None, spacing=dp(3))
         self.dc.bind(minimum_height=self.dc.setter('height'))
         self.dc.add_widget(L("暂无数据", 12, C_SUB))
