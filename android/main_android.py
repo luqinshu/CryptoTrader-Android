@@ -102,6 +102,13 @@ class App(App):
         self._auto_seconds = 0
         self._selected_strat_names = list(self.cfg.get('selected_strategies', ['OKX小时线波段共振策略']))
         self._strat_scanners = {}
+        self._smap = {
+            'okx_hour_strategy': 'OKX小时线波段共振策略',
+            'xiaoyue_boll': '小月期货多周期布林趋势转折',
+            'three_min_pullback': '三分钟多周期回调企稳策略',
+            'trend_squeeze': '趋势挤压突破前4_30_v2',
+            'AI五引擎合并独立版': 'AI五引擎合并独立版',
+        }
         self._pool_monitoring = False
         self._pool_monitor_timer = None
         self._monitor_lock = threading.Lock()
@@ -424,13 +431,6 @@ class App(App):
         Clock.schedule_once(_f)
 
     def _list_strats(self):
-        self._smap = {
-            'okx_hour_strategy': 'OKX小时线波段共振策略',
-            'xiaoyue_boll': '小月期货多周期布林趋势转折',
-            'three_min_pullback': '三分钟多周期回调企稳策略',
-            'trend_squeeze': '趋势挤压突破前4_30_v2',
-            'AI五引擎合并独立版': 'AI五引擎合并独立版',
-        }
         names = []
         for k, v in self._smap.items():
             if os.path.exists(os.path.join(self.dir, 'strategies', k+'.py')):
