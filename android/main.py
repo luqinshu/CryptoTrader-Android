@@ -1,7 +1,14 @@
 """
 CryptoScanner Pro - Android Full Version
 """
-import os, sys, json, threading, time, glob, traceback, importlib, warnings, logging
+import os, sys
+os.environ.setdefault('PYTHONIOENCODING', 'utf-8')
+try:
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+    sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+except Exception:
+    pass
+import json, threading, time, glob, traceback, importlib, warnings, logging
 warnings.filterwarnings('ignore')
 logging.getLogger('urllib3').setLevel(logging.WARNING)
 logging.getLogger('requests').setLevel(logging.WARNING)
