@@ -105,6 +105,8 @@ class App(App):
         self._pool_monitoring = False
         self._pool_monitor_timer = None
         self._monitor_lock = threading.Lock()
+        self._at_balance_cache = "账户: ----"
+        self._at_equity_cache = "权益: ----"
 
         root = BoxLayout(orientation='vertical')
 
@@ -114,7 +116,7 @@ class App(App):
         root.add_widget(tb)
 
         # tab bar
-        self.tabs = ['交易扫描', '交易池', '交易监控', '数据']
+        self.tabs = ['交易扫描', '交易池', '交易监控', '自动交易']
         self.tbtns = []
         tr = BoxLayout(size_hint_y=None, height=dp(44), spacing=dp(2))
         for i,n in enumerate(self.tabs):
@@ -137,7 +139,7 @@ class App(App):
     def _tab(self, btn):
         for b in self.tbtns: b.background_color = C_TAB if b is btn else C_OFF
         self.content.clear_widgets()
-        self.content.add_widget([self._scan_page(), self._pool_page(), self._trade_mon_page(), self._data_page()][btn.t])
+        self.content.add_widget([self._scan_page(), self._pool_page(), self._trade_mon_page(), self._auto_trade_page()][btn.t])
 
     # ═══════════════════ API Popup ═══════════════════
     def _show_api_popup(self):
@@ -932,27 +934,225 @@ class App(App):
             self._tmon_equity.text = getattr(self, '_tmon_equity_text', "权益: ----")
         self._refresh_positions_display()
 
-    # ═══════════════════ Data ═══════════════════
-    def _data_page(self):
-        p = BoxLayout(orientation='vertical', padding=dp(10), spacing=dp(8))
-        p.add_widget(L("交易对数据库", 15, C_TAB, True))
-        r = BoxLayout(size_hint_y=None, height=dp(48), spacing=dp(8))
-        self.di = TextInput(hint_text="如 BTC-USDT-SWAP", multiline=False,
-                            font_size=sp(14), background_color=C_CRD, foreground_color=C_TXT)
-        _f(self.di); r.add_widget(self.di)
-        r.add_widget(B("下载K线", C_BTN, 13, cb=lambda x: self._pop("数据库", "开发中")))
-        p.add_widget(r)
-        sv = ScrollView(size_hint_y=1, scroll_type=['bars', 'content'], bar_width=dp(6))
-        self.dc = BoxLayout(orientation='vertical', size_hint_y=None, spacing=dp(3))
-        self.dc.bind(minimum_height=self.dc.setter('height'))
-        self.dc.add_widget(L("暂无数据", 12, C_SUB))
-        sv.add_widget(self.dc)
+    # ═══════════════════ Auto Trade ═══════════════════
+    def _auto_trade_page(self):
+        p = BoxLayout(orientation='vertical', padding=dp(6), spacing=dp(4))
+
+        # header
+        p.add_widget(L("自动交易", 15, C_TAB, True))
+        self._at_balance = L("账户: ----", 13, C_TXT, True)
+        p.add_widget(self._at_balance)
+        self._at_equity = L("权益: ----", 12, C_SUB)
+        p.add_widget(self._at_equity)
+
+        # settings row
+        sr = BoxLayout(size_hint_y=None, height=dp(44), spacing=dp(4))
+        sr.add_widget(L("保证金", 11, C_SUB))
+        self._at_margin = TextInput(text=self.cfg.get('at_margin','50'), multiline=False,
+                                     font_size=sp(12), background_color=C_CRD, foreground_color=C_TXT,
+                                     size_hint_y=None, height=dp(40), input_filter='int', size_hint_x=0.12)
+        _f(self._at_margin); sr.add_widget(self._at_margin)
+        sr.add_widget(L("杠杆", 11, C_SUB))
+        self._at_lever = TextInput(text=self.cfg.get('at_lever','3'), multiline=False,
+                                    font_size=sp(12), background_color=C_CRD, foreground_color=C_TXT,
+                                    size_hint_y=None, height=dp(40), input_filter='int', size_hint_x=0.10)
+        _f(self._at_lever); sr.add_widget(self._at_lever)
+        sr.add_widget(B("刷新账户", (0.20,0.45,0.30,1), 12, cb=lambda x: self._at_refresh_account()))
+        p.add_widget(sr)
+
+        # pool candidate label
+        self._at_cand_count = L("池候选: 0", 12, C_SUB)
+        p.add_widget(self._at_cand_count)
+
+        # scrollable candidate + position list
+        sv = ScrollView(size_hint_y=1, scroll_type=['bars','content'], bar_width=dp(6))
+        self._at_list = BoxLayout(orientation='vertical', size_hint_y=None, spacing=dp(2))
+        self._at_list.bind(minimum_height=self._at_list.setter('height'))
+        sv.add_widget(self._at_list)
         p.add_widget(sv)
-        bar = BoxLayout(size_hint_y=None, height=dp(48), spacing=dp(8))
-        bar.add_widget(B("刷新", (0.20, 0.20, 0.25, 1), 13, cb=lambda x: self._pop("数据库", "已刷新")))
-        bar.add_widget(B("清空", C_RED, 13, cb=lambda x: self._pop("数据库", "已清空")))
+
+        # bottom buttons
+        bar = BoxLayout(size_hint_y=None, height=dp(40), spacing=dp(6))
+        bar.add_widget(B("刷新候选", (0.22,0.45,0.30,1), 12, cb=lambda x: self._at_refresh_candidates()))
+        bar.add_widget(B("平全部仓", C_RED, 12, cb=lambda x: self._at_close_all()))
         p.add_widget(bar)
+
+        self._at_refresh_candidates()
+        self._at_restore_display()
         return p
+
+    def _at_refresh_account(self):
+        self._status("获取账户...")
+        threading.Thread(target=self._at_refresh_account_thread, daemon=True).start()
+
+    def _at_refresh_account_thread(self):
+        try:
+            self._init_okx()
+            bal = self.okx.get_balance()
+            if isinstance(bal, dict) and bal.get('code') == '0':
+                data = bal.get('data', [])
+                if data and len(data) > 0:
+                    d = data[0]
+                    eq = d.get('totalEq', '0')
+                    bals = d.get('details', [])
+                    usdt = next((x for x in bals if x.get('ccy') == 'USDT'), {})
+                    avail = usdt.get('availEq', '0')
+                    self._at_balance_cache = f"可用: {avail} USDT"
+                    self._at_equity_cache = f"总权益: {eq} USDT"
+                else:
+                    self._at_balance_cache = "无余额数据"
+                    self._at_equity_cache = "权益: ----"
+            else:
+                self._at_balance_cache = "获取失败"
+                self._at_equity_cache = ""
+            Clock.schedule_once(lambda dt: self._at_restore_display())
+        except Exception as e:
+            Clock.schedule_once(lambda dt: self._pop("错误", str(e)))
+
+    def _at_restore_display(self):
+        if hasattr(self, '_at_balance') and self._at_balance:
+            self._at_balance.text = getattr(self, '_at_balance_cache', "账户: ----")
+        if hasattr(self, '_at_equity') and self._at_equity:
+            self._at_equity.text = getattr(self, '_at_equity_cache', "权益: ----")
+
+    def _at_refresh_candidates(self):
+        if not hasattr(self, '_at_list') or not self._at_list:
+            return
+        self._at_list.clear_widgets()
+
+        # filter pool items with monitoring data and direction
+        candidates = [r for r in self.pool if r.get('trend_d') in ('↑','↓')]
+        if hasattr(self, '_at_cand_count') and self._at_cand_count:
+            self._at_cand_count.text = f"池候选: {len(candidates)}/{len(self.pool)}"
+
+        if not candidates:
+            self._at_list.add_widget(L("无候选 — 请先扫描并启用池监控", 12, C_SUB))
+            return
+
+        # header
+        hdr = BoxLayout(size_hint_y=None, height=dp(28), spacing=dp(2))
+        cols = [("交易对", 0.16), ("方向", 0.10), ("日/时/分", 0.18), ("评分", 0.09),
+                ("策略", 0.14), ("保证金", 0.13), ("开仓", 0.10), ("杠杆", 0.10)]
+        for title, w in cols:
+            lbl = Label(text=title, font_size=sp(10), color=C_TAB, bold=True,
+                        halign='center', valign='middle', size_hint_x=w)
+            _f(lbl)
+            hdr.add_widget(lbl)
+        self._at_list.add_widget(hdr)
+
+        for r in candidates:
+            sym = r.get('symbol', '?').replace('-USDT-SWAP', '')
+            d = r.get('direction', '-')
+            dcolor = C_ACC if d == 'LONG' else (C_RED if d == 'SHORT' else C_SUB)
+            arrow = "↑" if d == 'LONG' else ("↓" if d == 'SHORT' else "→")
+            td = r.get('trend_d', '→'); th = r.get('trend_h', '→'); tm = r.get('trend_m', '→')
+            score = f"{r.get('score',0):.0f}"
+            strat = r.get('strategy', '')[:10]
+
+            row = BoxLayout(size_hint_y=None, height=dp(34), spacing=dp(2))
+            vals = [sym, f"{arrow}{d}", f"{td} {th} {tm}", score, strat]
+            for i, (val, (_, w)) in enumerate(zip(vals, cols)):
+                if i == 1: color = dcolor
+                elif i == 2: color = C_ACC if '↑' in td+th+tm else C_SUB
+                else: color = C_TXT
+                lbl = Label(text=val, font_size=sp(10), color=color,
+                           halign='center', valign='middle', size_hint_x=w)
+                _f(lbl)
+                row.add_widget(lbl)
+
+            # margin input
+            mi = TextInput(text=self._at_margin.text, multiline=False,
+                           font_size=sp(10), background_color=C_CRD, foreground_color=C_TXT,
+                           size_hint_y=None, height=dp(34), input_filter='int', size_hint_x=cols[5][1])
+            _f(mi); row.add_widget(mi)
+
+            # open button — long
+            op = Button(text="多", font_size=sp(10), color=C_TXT,
+                        background_color=C_ACC, background_normal='', size_hint_x=cols[6][1])
+            _f(op)
+            op.bind(on_release=lambda x, sym=sym, d='long', mi=mi: self._at_open(sym, d, mi.text))
+            row.add_widget(op)
+
+            # lever input
+            li = TextInput(text=self._at_lever.text, multiline=False,
+                           font_size=sp(10), background_color=C_CRD, foreground_color=C_TXT,
+                           size_hint_y=None, height=dp(34), input_filter='int', size_hint_x=cols[7][1])
+            _f(li); row.add_widget(li)
+            self._at_list.add_widget(row)
+
+    def _at_open(self, sym, direction, margin_text):
+        k = self.cfg.get('api_key',''); s = self.cfg.get('secret_key','')
+        if not k or not s: self._pop("提示", "请先配置 API"); return
+        try: margin_usdt = max(1, int(margin_text))
+        except: margin_usdt = 50
+        inst_id = sym if '-USDT-SWAP' in sym else f"{sym}-USDT-SWAP"
+        threading.Thread(target=self._at_open_thread, args=(inst_id, direction, margin_usdt), daemon=True).start()
+
+    def _at_open_thread(self, inst_id, direction, margin_usdt):
+        try:
+            self._init_okx()
+            lever = self._at_lever.text
+            td_mode = 'cross'
+
+            # set leverage
+            self.okx._request("POST", "/api/v5/account/set-leverage", data={
+                "instId": inst_id, "lever": lever, "mgnMode": td_mode
+            })
+
+            # get ticker for price
+            tk = self.okx.get_ticker(inst_id)
+            price = 0
+            if isinstance(tk, dict) and tk.get('code') == '0' and tk.get('data'):
+                price = float(tk['data'][0].get('last', 0))
+
+            if price <= 0:
+                Clock.schedule_once(lambda dt: self._pop("错误", "获取价格失败"))
+                return
+
+            # calculate size
+            sz = margin_usdt * int(lever) / price
+
+            side = 'buy' if direction == 'long' else 'sell'
+            posSide = 'long' if direction == 'long' else 'short'
+
+            r = self.okx.place_order(instId=inst_id, tdMode=td_mode, side=side,
+                                     ordType='market', sz=str(round(sz, 0)), posSide=posSide)
+
+            if isinstance(r, dict) and r.get('code') == '0':
+                Clock.schedule_once(lambda dt: self._pop("开仓成功", f"{inst_id} {direction} {sz:.0f}张"))
+                Clock.schedule_once(lambda dt: self._at_refresh_candidates())
+            else:
+                msg = r.get('msg', '?') if isinstance(r, dict) else '失败'
+                Clock.schedule_once(lambda dt: self._pop("开仓失败", msg))
+        except Exception as e:
+            Clock.schedule_once(lambda dt: self._pop("错误", str(e)))
+
+    def _at_close_all(self):
+        k = self.cfg.get('api_key',''); s = self.cfg.get('secret_key','')
+        if not k or not s: self._pop("提示", "请先配置 API"); return
+        threading.Thread(target=self._at_close_all_thread, daemon=True).start()
+
+    def _at_close_all_thread(self):
+        try:
+            self._init_okx()
+            pos = self.okx.get_positions()
+            if not isinstance(pos, dict) or pos.get('code') != '0':
+                return
+            data = pos.get('data', [])
+            for p in data:
+                inst_id = p.get('instId', '')
+                pos_side = p.get('posSide', 'long')
+                qty = p.get('pos', '0')
+                if float(qty) <= 0: continue
+                side = 'sell' if pos_side == 'long' else 'buy'
+                # close by reversing the side with posSide
+                side_close = 'sell' if pos_side == 'long' else 'buy'
+                self.okx.place_order(instId=inst_id, tdMode='cross', side=side_close,
+                                     ordType='market', sz=qty, posSide=pos_side, reduceOnly=True)
+                time.sleep(0.3)
+            Clock.schedule_once(lambda dt: self._status("平仓完成"))
+        except Exception as e:
+            Clock.schedule_once(lambda dt: self._pop("错误", str(e)))
 
     # ── helpers ──────────────────────────────────────────
     def _status(self, m):
