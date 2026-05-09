@@ -193,17 +193,14 @@ class App(App):
         sr2.add_widget(B("文件", (0.25, 0.45, 0.30, 1), 12, cb=self._load_from_file))
         p.add_widget(sr2)
 
-        # row 3: interval + scan buttons
+        # row 3: interval
         ir = BoxLayout(size_hint_y=None, height=dp(40), spacing=dp(4))
         self.tm = TextInput(text=str(self.cfg.get('interval','600')), hint_text="秒", multiline=False,
                             font_size=sp(12), background_color=C_CRD, foreground_color=C_TXT,
                             size_hint_y=None, height=dp(40), input_filter='int', size_hint_x=0.15)
         _f(self.tm)
         ir.add_widget(self.tm)
-        ir.add_widget(B("手动扫描", C_BTN, 12, cb=lambda x: self._scan(False)))
-        ir.add_widget(B("停止", C_RED, 12, cb=self._stop_scan))
-        self.ab = B("定时扫描", C_WARN, 12, cb=self._start_auto)
-        ir.add_widget(self.ab)
+        ir.add_widget(Label())  # spacer
         p.add_widget(ir)
 
         # progress + status
@@ -212,12 +209,20 @@ class App(App):
         self.st = L("就绪 ─ 配置 API 后扫描", 11, C_SUB)
         p.add_widget(self.st)
 
-        # results log (scrollable, fills remaining space)
+        # results log (scrollable, fills most space)
         sv = ScrollView(size_hint_y=1)
         self.rbox = BoxLayout(orientation='vertical', size_hint_y=None, spacing=dp(3))
         self.rbox.bind(minimum_height=self.rbox.setter('height'))
         sv.add_widget(self.rbox)
         p.add_widget(sv)
+
+        # three scan buttons at bottom
+        br = BoxLayout(size_hint_y=None, height=dp(50), spacing=dp(4))
+        br.add_widget(B("手动扫描", C_BTN, 14, cb=lambda x: self._scan(False)))
+        br.add_widget(B("停止", C_RED, 14, cb=self._stop_scan))
+        self.ab = B("定时扫描", C_WARN, 14, cb=self._start_auto)
+        br.add_widget(self.ab)
+        p.add_widget(br)
         return p
 
     def _init_okx(self):
