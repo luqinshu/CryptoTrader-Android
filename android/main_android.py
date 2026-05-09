@@ -348,6 +348,10 @@ class App(App):
         sv = ScrollView()
         flist = BoxLayout(orientation='vertical', size_hint_y=None, spacing=dp(4))
         flist.bind(minimum_height=flist.setter('height'))
+
+        self._file_popup = Popup(title="加载策略文件", content=c, size_hint=(0.88, 0.7),
+                                 background_color=(0.12, 0.12, 0.15, 0.97), separator_color=C_TAB, auto_dismiss=True)
+
         for fn, fp in display:
             btn = Button(text=fn, font_size=sp(13), color=C_TXT,
                          background_color=C_CRD, background_normal='',
@@ -357,13 +361,12 @@ class App(App):
             flist.add_widget(btn)
         sv.add_widget(flist)
         c.add_widget(sv)
+        c.add_widget(B("关闭", C_BTN, 13, cb=self._file_popup.dismiss))
+        self._file_popup.open()
 
-        pp = Popup(title="加载策略文件", content=c, size_hint=(0.88, 0.7),
-                   background_color=(0.12, 0.12, 0.15, 0.97), separator_color=C_TAB, auto_dismiss=True)
-        c.add_widget(B("关闭", C_BTN, 13, cb=pp.dismiss))
-        pp.open()
-
-    def _do_load_file(self, path, filename):
+    def _do_load_file(self, path, filename, popup=None):
+        if hasattr(self, '_file_popup') and self._file_popup:
+            self._file_popup.dismiss()
         try:
             name = filename.replace('.py', '')
             spec = importlib.util.spec_from_file_location(name, path)
