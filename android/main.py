@@ -173,53 +173,49 @@ class App(App):
 
     # ═══════════════════ Scanner ═══════════════════
     def _scan_page(self):
-        p = BoxLayout(orientation='vertical', padding=dp(8), spacing=dp(4))
+        p = BoxLayout(orientation='vertical', padding=dp(6), spacing=dp(3))
 
-        # settings row
-        sr = BoxLayout(size_hint_y=None, height=dp(42), spacing=dp(6))
-        sr.add_widget(B("API 设置", (0.30, 0.30, 0.35, 1), 12, cb=lambda x: self._show_api_popup()))
-        sr.add_widget(B("保存配置", (0.20, 0.20, 0.25, 1), 12, cb=lambda x: self._pop("配置", "已保存" if self._save() else "失败")))
+        # row 1: settings
+        sr = BoxLayout(size_hint_y=None, height=dp(40), spacing=dp(4))
+        sr.add_widget(B("API设置", (0.30, 0.30, 0.35, 1), 12, cb=lambda x: self._show_api_popup()))
+        sr.add_widget(B("保存", (0.20, 0.20, 0.25, 1), 12, cb=lambda x: self._pop("配置", "已保存" if self._save() else "失败")))
         p.add_widget(sr)
 
-        # strategy
-        sr2 = BoxLayout(size_hint_y=None, height=dp(42), spacing=dp(4))
+        # row 2: strategy
+        sr2 = BoxLayout(size_hint_y=None, height=dp(40), spacing=dp(4))
         self.ssp = Spinner(text='OKX小时线波段共振策略', values=self._list_strats(),
-                           size_hint_x=0.55, background_color=C_CRD, color=C_TXT, font_size=sp(12))
+                           size_hint_x=0.5, background_color=C_CRD, color=C_TXT, font_size=sp(12))
         _f(self.ssp)
         sr2.add_widget(self.ssp)
         sr2.add_widget(B("加载", C_BTN, 12, cb=self._load_strat))
-        sr2.add_widget(B("从文件", (0.25, 0.45, 0.30, 1), 12, cb=self._load_from_file))
+        sr2.add_widget(B("文件", (0.25, 0.45, 0.30, 1), 12, cb=self._load_from_file))
         p.add_widget(sr2)
 
-        # timer + auto
-        tr = BoxLayout(size_hint_y=None, height=dp(42), spacing=dp(6))
-        self.tm = TextInput(text=str(self.cfg.get('interval','600')), hint_text="间隔秒", multiline=False,
-                            font_size=sp(13), background_color=C_CRD, foreground_color=C_TXT,
-                            size_hint_y=None, height=dp(42), input_filter='int', size_hint_x=0.35)
+        # row 3: interval + scan buttons
+        ir = BoxLayout(size_hint_y=None, height=dp(40), spacing=dp(4))
+        self.tm = TextInput(text=str(self.cfg.get('interval','600')), hint_text="秒", multiline=False,
+                            font_size=sp(12), background_color=C_CRD, foreground_color=C_TXT,
+                            size_hint_y=None, height=dp(40), input_filter='int', size_hint_x=0.15)
         _f(self.tm)
-        tr.add_widget(self.tm)
-        self.ab = B("启动定时扫描", C_WARN, 12, cb=self._start_auto)
-        tr.add_widget(self.ab)
-        p.add_widget(tr)
+        ir.add_widget(self.tm)
+        ir.add_widget(B("手动扫描", C_BTN, 12, cb=lambda x: self._scan(False)))
+        ir.add_widget(B("停止", C_RED, 12, cb=self._stop_scan))
+        self.ab = B("定时扫描", C_WARN, 12, cb=self._start_auto)
+        ir.add_widget(self.ab)
+        p.add_widget(ir)
 
-        self.pb = ProgressBar(value=0, size_hint_y=None, height=dp(12))
+        # progress + status
+        self.pb = ProgressBar(value=0, size_hint_y=None, height=dp(10))
         p.add_widget(self.pb)
         self.st = L("就绪 ─ 配置 API 后扫描", 11, C_SUB)
         p.add_widget(self.st)
 
-        # results (scrollable)
+        # results log (scrollable, fills remaining space)
         sv = ScrollView(size_hint_y=1)
         self.rbox = BoxLayout(orientation='vertical', size_hint_y=None, spacing=dp(3))
         self.rbox.bind(minimum_height=self.rbox.setter('height'))
         sv.add_widget(self.rbox)
         p.add_widget(sv)
-
-        # bottom buttons
-        br = BoxLayout(size_hint_y=None, height=dp(50), spacing=dp(4))
-        br.add_widget(B("手动扫描", C_BTN, 13, cb=lambda x: self._scan(False)))
-        br.add_widget(B("停止扫描", C_RED, 13, cb=self._stop_scan))
-        br.add_widget(B("定时扫描", C_WARN, 13, cb=self._start_auto))
-        p.add_widget(br)
         return p
 
     def _init_okx(self):
@@ -248,12 +244,12 @@ class App(App):
     def _start_auto(self, btn):
         if self.auto_timer:
             self.auto_timer.cancel(); self.auto_timer = None
-            self.ab.text = "启动定时扫描"; self.ab.background_color = C_WARN
+            self.ab.text = "定时扫描"; self.ab.background_color = C_WARN
             self._status("定时已停止")
         else:
             try: sec = max(60, int(self.tm.text))
             except ValueError: sec = 600
-            self.ab.text = "停止定时扫描"; self.ab.background_color = C_RED
+            self.ab.text = "停止"; self.ab.background_color = C_RED
             self._save()
             self._status(f"定时 {sec}秒"); self._scan(auto=True)
             self.auto_timer = Clock.schedule_interval(lambda dt: self._scan(auto=True), sec)
