@@ -459,12 +459,15 @@ class App(App):
         bar = BoxLayout(size_hint_y=None, height=dp(44), spacing=dp(6))
         bar.add_widget(B("清空", C_RED, 13, cb=self._clr_pool))
         p.add_widget(bar)
+        self._refresh_pool_display()  # show existing data
         return p
 
     def _clr_pool(self, btn):
         self.pool = []
-        self._pool_text.text = "暂无数据"
-        self._pool_count.text = "共 0 条记录"
+        if hasattr(self, '_pool_text') and self._pool_text:
+            self._pool_text.text = "暂无数据"
+        if hasattr(self, '_pool_count') and self._pool_count:
+            self._pool_count.text = "共 0 条记录"
 
     def _refresh_pool_display(self):
         if not hasattr(self, '_pool_text') or not self._pool_text:
