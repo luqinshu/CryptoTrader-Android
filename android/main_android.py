@@ -173,8 +173,8 @@ class App(App):
         pp = Popup(title="API 设置", content=c, size_hint=(0.9, 0.75),
                    background_color=(0.12, 0.12, 0.15, 0.97), separator_color=C_TAB, auto_dismiss=False)
         def save(_):
-            self.cfg['api_key'] = ak.text; self.cfg['secret_key'] = sk.text
-            self.cfg['passphrase'] = ph.text; self.cfg['proxy_url'] = px.text
+            self.cfg['api_key'] = ak.text.strip(); self.cfg['secret_key'] = sk.text.strip()
+            self.cfg['passphrase'] = ph.text.strip(); self.cfg['proxy_url'] = px.text.strip()
             self._save()
             pp.dismiss()
             self._status("API 已保存")
@@ -184,7 +184,7 @@ class App(App):
     def _paste_to(self, field):
         try:
             from kivy.core.clipboard import Clipboard
-            text = Clipboard.get('text/plain') or Clipboard.get()
+            text = (Clipboard.get('text/plain') or Clipboard.get() or '').strip()
             if text:
                 field.text = text
         except Exception:
@@ -275,8 +275,8 @@ class App(App):
 
     def _init_okx(self):
         if not self.okx:
-            self.okx = OKXClient(api_key=self.cfg.get('api_key',''), secret_key=self.cfg.get('secret_key',''),
-                                 passphrase=self.cfg.get('passphrase',''), testnet=False,
+            self.okx = OKXClient(api_key=self.cfg.get('api_key','').strip(), secret_key=self.cfg.get('secret_key','').strip(),
+                                 passphrase=self.cfg.get('passphrase','').strip(), testnet=False,
                                  proxy_url=self.cfg.get('proxy_url','').strip() or None)
 
     def _scan(self, auto=False):
