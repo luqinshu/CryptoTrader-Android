@@ -3765,7 +3765,10 @@ def _to_df(rows):
         if rename: df = df.rename(columns=rename)
     else:
         clean = [r[:6] for r in (rows or []) if isinstance(r,(list,tuple)) and len(r)>=6]
-        if not clean: return pd.DataFrame(np.empty((0, 6)), columns=["ts","o","h","l","c","vol"])
+        if not clean:
+            df = pd.DataFrame(np.empty((0, 6)))
+            df.columns = ["ts","o","h","l","c","vol"]
+            return df
         df = pd.DataFrame(clean, columns=["ts","o","h","l","c","vol"])
     for c in ["ts","o","h","l","c","vol"]:
         if c in df.columns: df[c] = pd.to_numeric(df[c], errors="coerce")

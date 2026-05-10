@@ -27,13 +27,29 @@ def _to_df(klines) -> pd.DataFrame:
 
     Columns: ['ts', 'o', 'h', 'l', 'c', 'vol']
     """
+    _EMPTY_COLS = ['ts', 'o', 'h', 'l', 'c', 'vol']
+    
+    def _empty_df():
+        """ARM-safe empty DataFrame: avoids pd.DataFrame(columns=...) which
+        triggers init_dict → construct_1d_arraylike_from_scalar crash."""
+        try:
+            # try creating from numpy empty array first
+            arr = np.empty((0, 6))
+            df = pd.DataFrame(arr)
+            df.columns = _EMPTY_COLS
+            return df
+        except Exception:
+            # fallback: create a 1-row dummy then truncate
+            df = pd.DataFrame(np.zeros((1, 6)), columns=_EMPTY_COLS)
+            return df.iloc[0:0]
+    
     if not klines:
-        return pd.DataFrame(np.empty((0, 6)), columns=['ts', 'o', 'h', 'l', 'c', 'vol'])
+        return _empty_df()
     if isinstance(klines, pd.DataFrame):
         return klines
     valid = [r[:6] for r in klines if isinstance(r, (list, tuple)) and len(r) >= 6]
     if not valid:
-        return pd.DataFrame(np.empty((0, 6)), columns=['ts', 'o', 'h', 'l', 'c', 'vol'])
+        return _empty_df()
     try:
         df = pd.DataFrame(valid, columns=['ts', 'o', 'h', 'l', 'c', 'vol'])
         for col in df.columns:
