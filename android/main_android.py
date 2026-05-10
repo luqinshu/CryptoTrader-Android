@@ -13,6 +13,29 @@ warnings.filterwarnings('ignore')
 logging.getLogger('urllib3').setLevel(logging.WARNING)
 logging.getLogger('requests').setLevel(logging.WARNING)
 
+# ARM numpy dtype fix: prevent 'type object object has no attribute dtype'
+try:
+    import numpy as np
+    import pandas as pd
+    _orig_df_init = pd.DataFrame.__init__
+    def _safe_df_init(self, data=None, *args, **kwargs):
+        if 'dtype' not in kwargs and isinstance(data, (list, tuple)) and len(data) > 0:
+            try:
+                kwargs['dtype'] = np.float64
+            except Exception:
+                pass
+        try:
+            _orig_df_init(self, data, *args, **kwargs)
+        except AttributeError:
+            if isinstance(data, (list, tuple)):
+                arr = np.array(data, dtype=np.float64)
+                _orig_df_init(self, arr, *args, **kwargs)
+            else:
+                raise
+    pd.DataFrame.__init__ = _safe_df_init
+except Exception:
+    pass
+
 from kivy.config import Config
 Config.set('graphics', 'width', '390')
 Config.set('graphics', 'height', '844')
@@ -390,7 +413,16 @@ class App(App):
                             if self._cancel_flag: return
                             rr = self.okx.get_kline(iid, bar=bar, limit=200)
                             if isinstance(rr, dict) and rr.get('code') == '0' and rr.get('data'):
-                                kls[bar] = rr['data']
+                                # pre-convert to float to avoid ARM numpy dtype issues
+                                raw = rr['data']
+                                clean = []
+                                for row in raw:
+                                    try:
+                                        clean.append([float(row[0]), float(row[1]), float(row[2]),
+                                                       float(row[3]), float(row[4]), float(row[5])])
+                                    except Exception:
+                                        pass
+                                kls[bar] = clean
                         if not kls.get('1D') or not kls.get('1H'): continue
                         sym = ScannerSymbol(inst_id=iid, last_price=float(t.get('last', 0)),
                                             volume_24h=float(t.get('volCcyQuote') or t.get('vol24h') or 0),
