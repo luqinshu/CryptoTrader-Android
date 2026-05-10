@@ -13,26 +13,12 @@ warnings.filterwarnings('ignore')
 logging.getLogger('urllib3').setLevel(logging.WARNING)
 logging.getLogger('requests').setLevel(logging.WARNING)
 
-# ARM numpy dtype fix: prevent 'type object object has no attribute dtype'
+# Keep numpy/pandas import eager so packaging/runtime issues surface early,
+# but avoid monkey-patching pandas internals: several Android strategies build
+# DataFrames from dict rows, and a global dtype override can corrupt that path.
 try:
-    import numpy as np
-    import pandas as pd
-    _orig_df_init = pd.DataFrame.__init__
-    def _safe_df_init(self, data=None, *args, **kwargs):
-        if 'dtype' not in kwargs and isinstance(data, (list, tuple)) and len(data) > 0:
-            try:
-                kwargs['dtype'] = np.float64
-            except Exception:
-                pass
-        try:
-            _orig_df_init(self, data, *args, **kwargs)
-        except AttributeError:
-            if isinstance(data, (list, tuple)):
-                arr = np.array(data, dtype=np.float64)
-                _orig_df_init(self, arr, *args, **kwargs)
-            else:
-                raise
-    pd.DataFrame.__init__ = _safe_df_init
+    import numpy as np  # noqa: F401
+    import pandas as pd  # noqa: F401
 except Exception:
     pass
 
@@ -112,6 +98,7 @@ class App(App):
         Window.softinput_mode = 'below_target'
         self.dir = os.path.dirname(os.path.abspath(__file__))
         self.cfg_path = os.path.join(self.dir, "app_config.json")
+        self.runtime_log_path = os.path.join(self.dir, "runtime_error.log")
         self.cfg = self._load()
         self.okx = None
         self.scanner = OKXHourSwingScanner()
@@ -119,6 +106,7 @@ class App(App):
         self.pool = []
         self.monitors = []
         self.positions_data = []
+        self._scan_errors = []
         self._tmon_balance_text = "账户: ----"
         self._tmon_equity_text = "权益: ----"
         self.auto_timer = None
@@ -252,6 +240,7 @@ class App(App):
         sr = BoxLayout(size_hint_y=None, height=dp(40), spacing=dp(4))
         sr.add_widget(B("API设置", (0.30, 0.30, 0.35, 1), 12, cb=lambda x: self._show_api_popup()))
         sr.add_widget(B("保存", (0.20, 0.20, 0.25, 1), 12, cb=lambda x: self._pop("配置", "已保存" if self._save() else "失败")))
+        sr.add_widget(B("错误日志", (0.35, 0.22, 0.22, 1), 12, cb=lambda x: self._show_runtime_log()))
         p.add_widget(sr)
 
         # row 2: strategy picker button -> popup
@@ -319,6 +308,7 @@ class App(App):
         k = self.cfg.get('api_key',''); s = self.cfg.get('secret_key','')
         if not k or not s: self._pop("提示", "请先在 API 设置中填写 Key"); return
         self.scanning = True
+        self._scan_errors = []
         self._cancel_flag = False
         self._status("连接 OKX..."); self.pb.value = 0
         t = time.strftime("%H:%M:%S")
@@ -434,9 +424,18 @@ class App(App):
                                     found += 1
                                     self._add_res(res, strat_name)
                         except Exception as e2:
-                            self._add_log(f"{iid} 分析出错: {e2}")
+                            detail = self._record_runtime_error(
+                                "分析出错",
+                                e2,
+                                strategy=strat_name,
+                                symbol=iid,
+                            )
+                            self._add_log(f"{iid} 分析出错: {type(e2).__name__}: {e2}")
+                            self._add_log("    详情已写入错误日志，可点“错误日志”复制完整 traceback")
                     except Exception as e1:
-                        self._add_log(f"{iid} 获取数据失败"); continue
+                        self._record_runtime_error("获取数据失败", e1, strategy=strat_name, symbol=iid)
+                        self._add_log(f"{iid} 获取数据失败: {type(e1).__name__}: {e1}")
+                        continue
                     time.sleep(0.15)
                 self._add_log(f"━ {strat_name}: {found} 个机会")
                 total_found += found
@@ -444,6 +443,10 @@ class App(App):
             self._status(f"完成！{total_found} 个机会"); self._prog(100)
             if total_found == 0:
                 Clock.schedule_once(lambda dt: self._add_log("未发现符合条件的交易机会"))
+            if self._scan_errors:
+                msg = f"本次扫描有 {len(self._scan_errors)} 个异常，点“错误日志”可复制完整 traceback"
+                self._add_log(msg)
+                self._status(msg)
         except Exception as e: self._err(f"扫描失败: {e}")
         finally: self.scanning = False
 
@@ -1215,16 +1218,54 @@ class App(App):
         def _f(dt): self._pop("错误", m); self._status(m)
         Clock.schedule_once(_f)
 
+    def _record_runtime_error(self, title, exc, strategy=None, symbol=None):
+        parts = [time.strftime("%Y-%m-%d %H:%M:%S"), title]
+        if strategy:
+            parts.append(f"策略={strategy}")
+        if symbol:
+            parts.append(f"交易对={symbol}")
+        header = " | ".join(parts)
+        detail = f"{header}\n{type(exc).__name__}: {exc}\n{traceback.format_exc()}\n"
+        self._scan_errors.append(detail)
+        try:
+            with open(self.runtime_log_path, 'a', encoding='utf-8') as f:
+                f.write(detail)
+                f.write("\n" + ("-" * 80) + "\n")
+        except Exception:
+            pass
+        return detail
+
+    def _show_runtime_log(self):
+        text = "暂无错误日志"
+        try:
+            if os.path.exists(self.runtime_log_path):
+                with open(self.runtime_log_path, 'r', encoding='utf-8') as f:
+                    text = f.read().strip() or text
+        except Exception as e:
+            text = f"读取日志失败: {e}"
+        self._pop("错误日志", text)
+
     def _pop(self, title, text):
         c = BoxLayout(orientation='vertical', padding=dp(12), spacing=dp(8))
         l = TextInput(text=text, font_size=sp(13), readonly=True,
                       background_color=(0,0,0,0), foreground_color=C_TXT, size_hint_y=1)
         _f(l); c.add_widget(l)
-        b = Button(text="关闭", size_hint_y=None, height=dp(40),
-                   background_color=C_BTN, color=C_TXT)
-        _f(b); c.add_widget(b)
+        br = BoxLayout(size_hint_y=None, height=dp(40), spacing=dp(8))
+        cp = Button(text="复制", background_color=(0.25, 0.45, 0.25, 1), color=C_TXT)
+        _f(cp); br.add_widget(cp)
+        b = Button(text="关闭", background_color=C_BTN, color=C_TXT)
+        _f(b); br.add_widget(b)
+        c.add_widget(br)
         pp = Popup(title=title, content=c, size_hint=(0.85, 0.45),
                    background_color=(0.15, 0.15, 0.18, 0.95), separator_color=C_TAB)
+        def _copy(_):
+            try:
+                from kivy.core.clipboard import Clipboard
+                Clipboard.copy(text or "")
+                self._status("内容已复制到剪贴板")
+            except Exception as e:
+                self._status(f"复制失败: {e}")
+        cp.bind(on_release=_copy)
         b.bind(on_release=pp.dismiss); pp.open()
 
     def _load(self):

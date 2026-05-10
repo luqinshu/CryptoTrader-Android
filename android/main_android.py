@@ -13,26 +13,12 @@ warnings.filterwarnings('ignore')
 logging.getLogger('urllib3').setLevel(logging.WARNING)
 logging.getLogger('requests').setLevel(logging.WARNING)
 
-# ARM numpy dtype fix: prevent 'type object object has no attribute dtype'
+# Keep numpy/pandas import eager so packaging/runtime issues surface early,
+# but avoid monkey-patching pandas internals: several Android strategies build
+# DataFrames from dict rows, and a global dtype override can corrupt that path.
 try:
-    import numpy as np
-    import pandas as pd
-    _orig_df_init = pd.DataFrame.__init__
-    def _safe_df_init(self, data=None, *args, **kwargs):
-        if 'dtype' not in kwargs and isinstance(data, (list, tuple)) and len(data) > 0:
-            try:
-                kwargs['dtype'] = np.float64
-            except Exception:
-                pass
-        try:
-            _orig_df_init(self, data, *args, **kwargs)
-        except AttributeError:
-            if isinstance(data, (list, tuple)):
-                arr = np.array(data, dtype=np.float64)
-                _orig_df_init(self, arr, *args, **kwargs)
-            else:
-                raise
-    pd.DataFrame.__init__ = _safe_df_init
+    import numpy as np  # noqa: F401
+    import pandas as pd  # noqa: F401
 except Exception:
     pass
 
