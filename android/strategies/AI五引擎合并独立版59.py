@@ -3769,7 +3769,7 @@ def _to_df(rows):
         if rename: df = df.rename(columns=rename)
     else:
         clean = [r[:6] for r in (rows or []) if isinstance(r,(list,tuple)) and len(r)>=6]
-        if not clean: return pd.DataFrame(columns=["ts","o","h","l","c","vol"])
+        if not clean: return pd.DataFrame(np.empty((0, 6)), columns=["ts","o","h","l","c","vol"])
         try:
             df = pd.DataFrame(clean, columns=["ts","o","h","l","c","vol"])
             for col in df.columns:

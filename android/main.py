@@ -399,7 +399,7 @@ class App(App):
                     self._status(f"[{si+1}/{len(selected)}] {iid} [{strat_name[:8]}]")
                     try:
                         kls = {}
-                        for bar in ['1D', '1H', '15m', '3m']:
+                        for bar in ['1D', '4H', '1H', '15m', '3m']:
                             if self._cancel_flag: return
                             rr = self.okx.get_kline(iid, bar=bar, limit=200)
                             if isinstance(rr, dict) and rr.get('code') == '0' and rr.get('data'):

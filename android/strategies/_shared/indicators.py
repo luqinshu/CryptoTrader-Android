@@ -28,12 +28,12 @@ def _to_df(klines) -> pd.DataFrame:
     Columns: ['ts', 'o', 'h', 'l', 'c', 'vol']
     """
     if not klines:
-        return pd.DataFrame(columns=['ts', 'o', 'h', 'l', 'c', 'vol'])
+        return pd.DataFrame(np.empty((0, 6)), columns=['ts', 'o', 'h', 'l', 'c', 'vol'])
     if isinstance(klines, pd.DataFrame):
         return klines
     valid = [r[:6] for r in klines if isinstance(r, (list, tuple)) and len(r) >= 6]
     if not valid:
-        return pd.DataFrame(columns=['ts', 'o', 'h', 'l', 'c', 'vol'])
+        return pd.DataFrame(np.empty((0, 6)), columns=['ts', 'o', 'h', 'l', 'c', 'vol'])
     try:
         df = pd.DataFrame(valid, columns=['ts', 'o', 'h', 'l', 'c', 'vol'])
         for col in df.columns:
