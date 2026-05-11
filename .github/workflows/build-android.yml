@@ -45,14 +45,26 @@ jobs:
       run: |
         echo "JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64" >> "$GITHUB_ENV"
 
-    - name: Pre-accept Android SDK licenses
+    - name: Setup Android SDK (fix missing sdkmanager)
       run: |
-        rm -rf "$HOME/.buildozer/android/platform/android-sdk"
-        SDK_LICENSES="$HOME/.buildozer/android/platform/android-sdk/licenses"
-        mkdir -p "$SDK_LICENSES"
-        echo -e "\n24333f8a63b6825ea9c5514f83c2829b004d1fee" > "$SDK_LICENSES/android-sdk-license"
-        echo -e "\n84831b9409646a918e30573bab4c9c91346d8abd" > "$SDK_LICENSES/android-sdk-preview-license"
-        echo "Android SDK licenses accepted"
+        SDK_ROOT="$HOME/.buildozer/android/platform/android-sdk"
+        rm -rf "$SDK_ROOT"
+        mkdir -p "$SDK_ROOT"
+        # Download cmdline-tools (provides sdkmanager)
+        cd /tmp
+        wget -q https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
+        unzip -q commandlinetools-linux-11076708_latest.zip
+        mkdir -p "$SDK_ROOT/cmdline-tools"
+        mv cmdline-tools "$SDK_ROOT/cmdline-tools/latest"
+        # Buildozer expects sdkmanager at tools/bin/ — symlink it
+        mkdir -p "$SDK_ROOT/tools/bin"
+        ln -s "$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" "$SDK_ROOT/tools/bin/sdkmanager"
+        ln -s "$SDK_ROOT/cmdline-tools/latest/bin/avdmanager" "$SDK_ROOT/tools/bin/avdmanager" 2>/dev/null || true
+        # Accept licenses
+        yes | "$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" --sdk_root="$SDK_ROOT" --licenses > /dev/null 2>&1 || true
+        mkdir -p "$SDK_ROOT/licenses"
+        echo -e "\n24333f8a63b6825ea9c5514f83c2829b004d1fee" > "$SDK_ROOT/licenses/android-sdk-license"
+        echo "SDK ready, sdkmanager: $(ls -la "$SDK_ROOT/tools/bin/sdkmanager")"
 
     - name: Build APK
       working-directory: android
