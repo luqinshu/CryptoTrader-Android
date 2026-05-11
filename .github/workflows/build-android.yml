@@ -71,8 +71,11 @@ jobs:
         git clone --depth 1 https://github.com/kivy/python-for-android.git "$P4A_DIR"
         sed -i 's/^    version = ".*"/    version = "3.11.5"/' "$P4A_DIR/pythonforandroid/recipes/hostpython3/__init__.py"
         sed -i "s/^    version = '.*'/    version = '3.11.5'/" "$P4A_DIR/pythonforandroid/recipes/python3/__init__.py"
+        sed -i 's/^    version = "v2\..*"/    version = "v1.26.4"/' "$P4A_DIR/pythonforandroid/recipes/numpy/__init__.py"
+        sed -i 's|numpy/_core/include|numpy/core/include|' "$P4A_DIR/pythonforandroid/recipes/numpy/__init__.py"
         echo "PATCHED hostpython3: $(grep 'version\s*=' "$P4A_DIR/pythonforandroid/recipes/hostpython3/__init__.py")"
         echo "PATCHED python3:      $(grep 'version\s*=' "$P4A_DIR/pythonforandroid/recipes/python3/__init__.py")"
+        echo "PATCHED numpy:        $(grep 'version\s*=' "$P4A_DIR/pythonforandroid/recipes/numpy/__init__.py")"
         sed -i "s|^android\.display_cutout|p4a.source_dir = $P4A_DIR\n&|" buildozer.spec
         
         echo "=== Building with buildozer ==="
