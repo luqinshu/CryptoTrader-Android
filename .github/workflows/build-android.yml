@@ -102,16 +102,48 @@ jobs:
         path: android/bin/*.apk
         retention-days: 30
 
-    - name: Show tail of build log on failure
+    - name: Show error location summary
       if: failure()
       working-directory: android
       run: |
-        echo "=== LAST 50 LINES OF buildozer_output.txt ==="
-        tail -50 buildozer_output.txt 2>/dev/null || echo "(no buildozer_output.txt)"
-        echo "=== SEARCHING FOR ERRORS IN OUTPUT ==="
-        grep -i "error\|exception\|traceback\|FAILED\|fatal" buildozer_output.txt 2>/dev/null | tail -30 || echo "(no output file)"
-        echo "=== SEARCHING FOR ERRORS IN .buildozer ==="
-        grep -ri "error\|exception\|traceback\|FAILED\|fatal" .buildozer/ 2>/dev/null | tail -50 || echo "(no .buildozer dir)"
+        ERROR_FILE="build_extracted_errors.txt"
+        {
+          echo "======================= ERROR LOCATION REPORT ======================="
+          echo ""
+
+          if [ -f buildozer_output.txt ]; then
+            TOTAL=$(wc -l < buildozer_output.txt)
+            echo "--- buildozer_output.txt ($TOTAL lines total) ---"
+            echo ""
+
+            # Extract error lines with line numbers
+            grep -n -i "error\|exception\|traceback\|FAILED\|fatal\|abort\|Segmentation" buildozer_output.txt | tail -80 | awk -F: '{printf ">>> LINE %s: %s\n", $1, substr($0, length($1)+2)}'
+
+            echo ""
+            echo "--- LAST 80 LINES OF OUTPUT ---"
+            tail -80 buildozer_output.txt
+            echo ""
+          else
+            echo "(no buildozer_output.txt)"
+          fi
+
+          if [ -d .buildozer ]; then
+            echo "--- .buildozer error lines ---"
+            grep -rn -i "error\|exception\|traceback\|FAILED\|fatal" .buildozer/ 2>/dev/null | tail -60 || echo "(none)"
+          fi
+
+          echo ""
+          echo "====================================================================="
+          echo "Copy everything between the === lines above to share the error."
+        } | tee "$ERROR_FILE"
+
+    - name: Upload error report
+      if: failure()
+      uses: actions/upload-artifact@v4
+      with:
+        name: error-location-report
+        path: android/build_extracted_errors.txt
+        retention-days: 7
 
     - name: Publish build output to public release
       if: always()
