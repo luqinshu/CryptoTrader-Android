@@ -64,21 +64,26 @@ jobs:
         echo "SDK ready, sdkmanager: $(ls -la "$SDK_ROOT/tools/bin/sdkmanager")"
 
     - name: Pin p4a to Python 3.11 (master now defaults to 3.14)
+      working-directory: android
       run: |
-        # buildozer.spec has p4a.source_dir = ../python-for-android-pinned
-        # Pre-clone + patch to Python 3.11.5 so buildozer never auto-clones
+        # buildozer.spec has p4a.source_dir = ../python-for-android-pinned (in [app] section)
         P4A_DIR="$GITHUB_WORKSPACE/python-for-android-pinned"
         rm -rf "$P4A_DIR"
         git clone --depth=1 --branch develop https://github.com/kivy/python-for-android.git "$P4A_DIR"
+        
+        # Force both hostpython3 and python3 recipes to use 3.11.5
         for recipe in hostpython3 python3; do
           RECIPE="$P4A_DIR/pythonforandroid/recipes/$recipe/__init__.py"
           if [ -f "$RECIPE" ]; then
-            grep -q '3\.14' "$RECIPE" && sed -i 's|v3\.14\.[0-9]*\.tar\.gz|v3.11.5.tar.gz|g; s/version *= *"3\.14\.[0-9]*"/version = "3.11.5"/' "$RECIPE" || true
+            sed -i 's/version\s*=\s*"[^"]*"/version = "3.11.5"/' "$RECIPE"
+            echo "PATCHED $recipe: $(grep 'version\s*=' "$RECIPE")"
           fi
         done
-        # Clean any cached 3.14 downloads
-        rm -rf "$HOME/.buildozer/android/platform/packages/Python-3.14*" 2>/dev/null || true
-        echo "Patched: $(grep -r 'version\s*=' "$P4A_DIR/pythonforandroid/recipes/hostpython3/__init__.py" "$P4A_DIR/pythonforandroid/recipes/python3/__init__.py" 2>/dev/null)"
+        
+        # Clean any cached 3.14 tarballs or build artifacts from previous runs
+        rm -rf .buildozer/android/platform/packages/Python-3.14* 2>/dev/null || true
+        rm -rf .buildozer/android/platform/build-*/build/other_builds/python3* 2>/dev/null || true
+        rm -rf .buildozer/android/platform/build-*/build/other_builds/hostpython3* 2>/dev/null || true
 
     - name: Build APK
       working-directory: android
