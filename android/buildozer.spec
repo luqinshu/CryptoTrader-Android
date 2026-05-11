@@ -27,8 +27,6 @@ android.screen = portrait
 android.use_fullscreen = False
 android.display_cutout = True
 
-p4a.source_dir = ../python-for-android-pinned
-
 [buildozer]
 log_level = 2
 warn_on_root = 1
