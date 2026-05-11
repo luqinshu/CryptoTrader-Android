@@ -8,7 +8,7 @@ source.exclude_dirs = tests,venv,.git,__pycache__,.claude,.venv
 
 version = 1.0.0
 
-requirements = python3,kivy,pandas,numpy,ta,requests,urllib3,chardet,certifi,idna
+requirements = python3,kivy==2.3.0,pandas,numpy,ta,requests,urllib3,chardet,certifi,idna,android
 
 orientation = portrait
 fullscreen = 0
@@ -32,3 +32,4 @@ log_level = 2
 warn_on_root = 1
 build_dir = .buildozer
 bin_dir = bin
+p4a.source_dir = ../python-for-android-pinned

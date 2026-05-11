@@ -63,6 +63,27 @@ jobs:
         echo -e "\n24333f8a63b6825ea9c5514f83c2829b004d1fee" > "$SDK_ROOT/licenses/android-sdk-license"
         echo "SDK ready, sdkmanager: $(ls -la "$SDK_ROOT/tools/bin/sdkmanager")"
 
+    - name: Pin p4a to Python 3.11 (master now defaults to 3.14)
+      working-directory: android
+      run: |
+        P4A_DIR="../python-for-android-pinned"
+        rm -rf "$P4A_DIR"
+        git clone --depth=1 https://github.com/kivy/python-for-android.git "$P4A_DIR"
+        # Patch hostpython3 recipe to use Python 3.11.5 instead of 3.14
+        HOSTPY="$P4A_DIR/pythonforandroid/recipes/hostpython3/__init__.py"
+        if [ -f "$HOSTPY" ]; then
+          sed -i 's/"3\.14\.[0-9]*"/"3.11.5"/' "$HOSTPY"
+          sed -i 's|v3\.14\.[0-9]*\.tar\.gz|v3.11.5.tar.gz|' "$HOSTPY"
+        fi
+        PY3="$P4A_DIR/pythonforandroid/recipes/python3/__init__.py"
+        if [ -f "$PY3" ]; then
+          sed -i 's/"3\.14\.[0-9]*"/"3.11.5"/' "$PY3"
+          sed -i 's|v3\.14\.[0-9]*\.tar\.gz|v3.11.5.tar.gz|' "$PY3"
+        fi
+        # Prevent p4a from overwriting our patched recipes
+        find "$P4A_DIR" -name "*.py" -exec touch -t 209901010000 {} +
+        echo "Patched p4a to use Python 3.11.5"
+
     - name: Build APK
       working-directory: android
       run: |
