@@ -27,7 +27,14 @@ Config.set('graphics', 'width', '390')
 Config.set('graphics', 'height', '844')
 Config.set('graphics', 'resizable', True)
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+ANDROID_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.dirname(ANDROID_DIR)
+
+for path in (ANDROID_DIR, PROJECT_ROOT):
+    if path in sys.path:
+        sys.path.remove(path)
+sys.path.insert(0, PROJECT_ROOT)
+sys.path.insert(1, ANDROID_DIR)
 
 try:
     from kivy.app import App
@@ -44,8 +51,8 @@ try:
     from kivy.core.window import Window
     from kivy.graphics import Color, Rectangle
     from src.api.okx_client import OKXClient
-    from src.scanner.base_scanner import ScannerSymbol
-    from strategies.okx_swing import OKXHourSwingScanner
+    from src.scanner.engine import ScanEngine
+    from src.strategy.loader import StrategyLoader
     IMP_OK = True
 except Exception as e:
     IMP_OK = False
@@ -93,15 +100,20 @@ def TI(hint='', text='', pw=False):
     _f(t); return t
 
 
-class App(App):
+class CryptoScannerApp(App):
     def build(self):
         Window.softinput_mode = 'below_target'
-        self.dir = os.path.dirname(os.path.abspath(__file__))
+        self.dir = ANDROID_DIR
+        self.project_root = PROJECT_ROOT
         self.cfg_path = os.path.join(self.dir, "app_config.json")
         self.runtime_log_path = os.path.join(self.dir, "runtime_error.log")
         self.cfg = self._load()
         self.okx = None
-        self.scanner = OKXHourSwingScanner()
+        self.scan_engine = None
+        self.strategy_loader = None
+        self.available_strategies = []
+        self._strategy_infos_by_name = {}
+        self._strategies_dir = self._resolve_strategy_dir()
         self.scanning = False
         self.pool = []
         self.monitors = []
@@ -112,22 +124,21 @@ class App(App):
         self.auto_timer = None
         self._auto_seconds = 0
         self._selected_strat_names = list(self.cfg.get('selected_strategies', ['OKX小时线波段共振策略']))
-        self._strat_scanners = {}
-        self._smap = {
-            'okx_hour_strategy': 'OKX小时线波段共振策略',
-            'xiaoyue_boll': '小月期货多周期布林趋势转折',
-            'three_min_pullback': '三分钟多周期回调企稳策略',
-            'trend_squeeze': '趋势挤压突破前4_30_v2',
-            'AI五引擎合并独立版': 'AI五引擎合并独立版',
-            'AI五引擎合并独立版59': 'AI五引擎合并独立版v5.9',
-            'xiaoyue_boll_59': '小月期货多周期布林v5.9',
-            'trend_squeeze_59': '趋势挤压突破前v5.9',
+        self._strategy_aliases = {
+            'AI五引擎合并独立版v5.9': 'AI五引擎合并独立版5.9',
+            'AI五引擎合并独立版': 'AI五引擎合并独立版5.9',
+            '趋势挤压突破前v5.9': '趋势挤压突破前5.9',
+            '小月期货多周期布林v5.9': '小月期货多周期布林趋势转折5.9',
+            '波段八策略组合扫描器_独立版': '波段八策略组合扫描器_独立版5.9',
         }
         self._pool_monitoring = False
         self._pool_monitor_timer = None
         self._monitor_lock = threading.Lock()
         self._at_balance_cache = "账户: ----"
         self._at_equity_cache = "权益: ----"
+        self._active_scan_strategy_name = ""
+        self._init_strategy_loader()
+        self._selected_strat_names = self._normalize_strategy_names(self._selected_strat_names)
 
         root = BoxLayout(orientation='vertical')
 
@@ -213,6 +224,59 @@ class App(App):
         except Exception:
             pass
 
+    def _resolve_strategy_dir(self):
+        shared_dir = os.path.join(self.project_root, 'strategies')
+        local_dir = os.path.join(self.dir, 'strategies')
+        if os.path.isdir(shared_dir):
+            return shared_dir
+        return local_dir
+
+    def _init_strategy_loader(self):
+        self._strategies_dir = self._resolve_strategy_dir()
+        try:
+            self.strategy_loader = StrategyLoader(self._strategies_dir)
+        except Exception:
+            self.strategy_loader = None
+        self._strategy_infos_by_name = {}
+        self._load_strategies()
+
+    def _normalize_strategy_names(self, names):
+        normalized = []
+        for name in names or []:
+            mapped = self._strategy_aliases.get(name, name)
+            if mapped not in normalized:
+                normalized.append(mapped)
+        available = set(self._strategy_infos_by_name.keys())
+        filtered = [name for name in normalized if not available or name in available]
+        if filtered:
+            return filtered
+        if self.available_strategies:
+            return [self.available_strategies[0]]
+        return ['无可用策略']
+
+    def _load_strategies(self):
+        self.available_strategies = []
+        try:
+            infos = self.strategy_loader.discover_strategies() if self.strategy_loader else []
+            infos = sorted(infos, key=lambda item: item.name)
+            self.available_strategies = [info.name for info in infos]
+            self._strategy_infos_by_name = {info.name: info for info in infos}
+        except Exception:
+            self._strategy_infos_by_name = {}
+        if not self.available_strategies:
+            self.available_strategies = ['无可用策略']
+        return self.available_strategies
+
+    def _get_strategy_info(self, name):
+        if not name:
+            return None
+        canonical = self._strategy_aliases.get(name, name)
+        info = self._strategy_infos_by_name.get(canonical)
+        if info is not None:
+            return info
+        self._load_strategies()
+        return self._strategy_infos_by_name.get(canonical)
+
     def _test(self, k, s, p, x):
         if not k or not s:
             self._pop("提示", "请填写 API Key 和 Secret Key"); return
@@ -231,6 +295,22 @@ class App(App):
                 Clock.schedule_once(lambda dt: self._pop("失败", msg))
         except Exception as e:
             Clock.schedule_once(lambda dt: self._pop("错误", str(e)))
+
+    def _engine_progress_callback(self, value, message, symbol="", count=0, total=0, remaining="", strategy_name="", strategy_index=0, strategy_total=1):
+        if self._cancel_flag:
+            return True
+        prefix = f"[{strategy_index + 1}/{strategy_total}] {strategy_name} " if strategy_total > 1 and strategy_name else ""
+        suffix = ""
+        if total:
+            suffix = f" ({count}/{total})"
+        if remaining:
+            suffix += f" {remaining}"
+        self._prog(value)
+        self._status(f"{prefix}{message}{suffix}")
+        return False
+
+    def _engine_result_callback(self, res, strategy_name):
+        self._add_res(dict(res), strategy_name)
 
     # ═══════════════════ Scanner ═══════════════════
     def _scan_page(self):
@@ -302,6 +382,10 @@ class App(App):
             self.okx = OKXClient(api_key=self.cfg.get('api_key','').strip(), secret_key=self.cfg.get('secret_key','').strip(),
                                  passphrase=self.cfg.get('passphrase','').strip(), testnet=False,
                                  proxy_url=self.cfg.get('proxy_url','').strip() or None)
+        if self.scan_engine is None:
+            self.scan_engine = ScanEngine(self.okx)
+        else:
+            self.scan_engine.okx_client = self.okx
 
     def _scan(self, auto=False):
         if self.scanning: return
@@ -318,6 +402,11 @@ class App(App):
     def _stop_scan(self, btn):
         if self.scanning:
             self._cancel_flag = True
+            if self.scan_engine is not None:
+                try:
+                    self.scan_engine.request_stop()
+                except Exception:
+                    pass
             self._status("正在停止...")
         else:
             self._status("没有正在进行的扫描")
@@ -367,76 +456,43 @@ class App(App):
 
     def _scan_thread(self):
         try:
-            self._init_okx(); self._status("获取行情..."); self._prog(5)
-            if self._cancel_flag: return
-            r = self.okx.get_tickers('SWAP')
-            if not isinstance(r, dict) or r.get('code') != '0':
-                self._err(f"API错误: {r.get('msg','?') if isinstance(r,dict) else '连接失败'}"); return
-            ticks = r.get('data', [])
-            swaps = [t for t in ticks if t.get('instId','').endswith('-USDT-SWAP')]
-            active = sorted([t for t in swaps if float(t.get('volCcyQuote') or t.get('vol24h') or 0) > 5000000],
-                            key=lambda t: float(t.get('volCcyQuote') or t.get('vol24h') or 0), reverse=True)[:30]
-            self._prog(10)
+            self._init_okx()
             selected = list(self._selected_strat_names)
+            if not selected:
+                self._err("请先至少选择一个策略")
+                return
             total_found = 0
 
             for si, strat_name in enumerate(selected):
                 if self._cancel_flag:
                     self._status(f"已取消"); self._prog(0); return
-                scanner = self._load_strat_scanner(strat_name)
-                if not scanner:
+                info = self._get_strategy_info(strat_name)
+                if info is None:
                     self._add_log(f"⚠ 策略加载失败: {strat_name}")
                     continue
-                self.scanner = scanner
-                self._status(f"[{si+1}/{len(selected)}] {strat_name} 扫描中..."); self._prog(10)
+                strategy = info.create_instance({})
+                if strategy is None:
+                    self._add_log(f"⚠ 策略实例化失败: {strat_name}")
+                    continue
+                self._active_scan_strategy_name = strat_name
+                self._status(f"[{si+1}/{len(selected)}] {strat_name} 扫描中...")
                 found = 0
-                for i, t in enumerate(active):
+                try:
+                    results = self.scan_engine.run_scan(
+                        strategy,
+                        progress_callback=lambda v, m, symbol="", count=0, total=0, remaining="", sn=strat_name, idx=si:
+                            self._engine_progress_callback(v, m, symbol, count, total, remaining, sn, idx, len(selected)),
+                        result_callback=lambda res, sn=strat_name: self._engine_result_callback(res, sn),
+                    )
+                    found = len(results or [])
+                except Exception as exc:
+                    self._record_runtime_error("扫描出错", exc, strategy=strat_name)
+                    self._add_log(f"⚠ {strat_name} 扫描失败: {type(exc).__name__}: {exc}")
+                    self._add_log("    详情已写入错误日志，可点“错误日志”复制完整 traceback")
                     if self._cancel_flag:
-                        self._status(f"已取消 (分析 {total_found} 个)"); self._prog(0); return
-                    iid = t['instId']
-                    pct = 10 + int(85 * (i + 1) / len(active))
-                    self._prog(pct)
-                    self._status(f"[{si+1}/{len(selected)}] {iid} [{strat_name[:8]}]")
-                    try:
-                        kls = {}
-                        for bar in ['1D', '4H', '1H', '15m', '3m']:
-                            if self._cancel_flag: return
-                            rr = self.okx.get_kline(iid, bar=bar, limit=200)
-                            if isinstance(rr, dict) and rr.get('code') == '0' and rr.get('data'):
-                                # pre-convert to float to avoid ARM numpy dtype issues
-                                raw = rr['data']
-                                clean = []
-                                for row in raw:
-                                    try:
-                                        clean.append([float(row[0]), float(row[1]), float(row[2]),
-                                                       float(row[3]), float(row[4]), float(row[5])])
-                                    except Exception:
-                                        pass
-                                kls[bar] = clean
-                        if not kls.get('1D') or not kls.get('1H'): continue
-                        sym = ScannerSymbol(inst_id=iid, last_price=float(t.get('last', 0)),
-                                            volume_24h=float(t.get('volCcyQuote') or t.get('vol24h') or 0),
-                                            extra_data={'klines': kls})
-                        try:
-                            res = scanner.scan_symbol(sym)
-                            if isinstance(res, dict):
-                                if res.get('passed', False) or res.get('score', 0) >= 60:
-                                    found += 1
-                                    self._add_res(res, strat_name)
-                        except Exception as e2:
-                            detail = self._record_runtime_error(
-                                "分析出错",
-                                e2,
-                                strategy=strat_name,
-                                symbol=iid,
-                            )
-                            self._add_log(f"{iid} 分析出错: {type(e2).__name__}: {e2}")
-                            self._add_log("    详情已写入错误日志，可点“错误日志”复制完整 traceback")
-                    except Exception as e1:
-                        self._record_runtime_error("获取数据失败", e1, strategy=strat_name, symbol=iid)
-                        self._add_log(f"{iid} 获取数据失败: {type(e1).__name__}: {e1}")
-                        continue
-                    time.sleep(0.15)
+                        self._status("已取消")
+                        self._prog(0)
+                        return
                 self._add_log(f"━ {strat_name}: {found} 个机会")
                 total_found += found
 
@@ -460,32 +516,36 @@ class App(App):
         r['strategy'] = strat_name or self._cur_strat_name
         self.pool.append(r)
         def _f(dt):
-            d = r.get('direction','NEUTRAL')
+            d = str(r.get('direction','NEUTRAL') or 'NEUTRAL').upper()
+            d = {'BUY': 'LONG', 'SELL': 'SHORT'}.get(d, d)
+            r['direction'] = d
             arrow = "↑" if d == 'LONG' else ("↓" if d == 'SHORT' else "→")
-            sigs = ' | '.join(r.get('signals',[])[:3]) or '无信号'
-            line = f"[b]{r.get('symbol','?')}[/b] {arrow}{d} {r.get('score',0):.0f}分  {sigs}"
+            signals = r.get('signals', [])
+            sigs = ' | '.join(signals[:3]) if signals else str(r.get('reason') or r.get('category') or '无信号')
+            score = float(r.get('score', r.get('composite_score', 0)) or 0)
+            line = f"[b]{r.get('symbol','?')}[/b] {arrow}{d} {score:.0f}分  {sigs}"
             self.rlog.text += line + "\n"
             self._refresh_pool_display()
         Clock.schedule_once(_f)
 
     def _list_strats(self):
-        names = []
-        for k, v in self._smap.items():
-            try:
-                if importlib.util.find_spec(f'strategies.{k}'):
-                    names.append(v)
-            except Exception:
-                pass
-        return names or ['OKX小时线波段共振策略']
+        self._load_strategies()
+        return self.available_strategies or ['无可用策略']
 
     def _load_strat(self, btn):
         """Load selected strategy from spinner"""
         name = self.ssp.text
-        if not name: return
-        rev = {v:k for k,v in self._smap.items()}
-        fname = rev.get(name, name)
-        fpath = os.path.join(self.dir, 'strategies', fname+'.py')
-        self._do_load_file(fpath, fname+'.py')
+        if not name:
+            return
+        info = self._get_strategy_info(name)
+        if info is None:
+            self._pop("错误", f"未找到策略: {name}")
+            return
+        self._selected_strat_names = [name]
+        self._cur_strat_name = name
+        self._save()
+        self._strat_btn.text = f"策略(1): {name}"
+        self._pop("成功", f"已加载策略: {name}")
 
     def _load_from_file(self, btn):
         from kivy.uix.filechooser import FileChooserListView
@@ -586,69 +646,31 @@ class App(App):
             return
         self._strat_btn.text = f"策略: {len(self._selected_strat_names)}个已选"
         self._save()
-        self._load_strat_scanner(self._selected_strat_names[0])
+        self._cur_strat_name = self._selected_strat_names[0]
 
     def _load_strat_scanner(self, name):
-        """Load and cache scanner class for a given display name. Returns scanner instance."""
-        if name in self._strat_scanners:
-            return self._strat_scanners[name]
-        rev = {v: k for k, v in self._smap.items()}
-        fname = rev.get(name, name)
-        mod = None
-        # try module import first (works on Android where .py may be compiled)
-        try:
-            mod = importlib.import_module(f'strategies.{fname}')
-        except Exception:
-            pass
-        # fallback: file-based load for desktop dev
-        if mod is None:
-            fpath = os.path.join(self.dir, 'strategies', fname + '.py')
-            try:
-                spec = importlib.util.spec_from_file_location(fname, fpath)
-                if spec:
-                    mod = importlib.util.module_from_spec(spec)
-                    spec.loader.exec_module(mod)
-            except Exception:
-                pass
-        if mod is None:
-            return None
-        try:
-            for cls_name in ['OKXHourSwingScanner', 'XiaoYueBollMacdScanner',
-                             'TrendSqueezeBreakoutScannerV3', 'AICrossSectionDualFactorComboScanner',
-                             'ThreeMinuteMultiTimeframePullbackStrategy']:
-                if hasattr(mod, cls_name):
-                    scanner = getattr(mod, cls_name)()
-                    self._strat_scanners[name] = scanner
-                    return scanner
-        except Exception:
-            pass
-        return None
+        return self._get_strategy_info(name)
 
     def _do_load_file(self, path, filename, popup=None, silent=False):
         if hasattr(self, '_file_popup') and self._file_popup:
             self._file_popup.dismiss()
         if popup: popup.dismiss()
         try:
-            name = filename.replace('.py', '')
-            spec = importlib.util.spec_from_file_location(name, path)
-            if not spec: self._pop("错误", "无法解析文件"); return
-            mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
-            scanner_cls = None
-            for cls_name in ['OKXHourSwingScanner', 'XiaoYueBollMacdScanner',
-                             'TrendSqueezeBreakoutScannerV3', 'AICrossSectionDualFactorComboScanner',
-                             'ThreeMinuteMultiTimeframePullbackStrategy']:
-                if hasattr(mod, cls_name):
-                    scanner_cls = getattr(mod, cls_name); break
-            if scanner_cls:
-                self.scanner = scanner_cls()
-                self._cur_strat_name = filename.replace('.py','')
-                self._selected_strat_names = [self._cur_strat_name]
-                self._strat_scanners[self._cur_strat_name] = self.scanner
-                self._strat_btn.text = f"策略(1): {self._cur_strat_name}"
-                self._save()
-                if not silent: self._pop("成功", f"已加载: {filename}")
-            else:
-                if not silent: self._pop("提示", f"文件中未找到策略类: {filename}")
+            if self.strategy_loader is None:
+                self._init_strategy_loader()
+            info = self.strategy_loader.load_custom_strategy(path) if self.strategy_loader else None
+            if info is None:
+                if not silent:
+                    self._pop("错误", f"无法解析策略文件: {filename}")
+                return
+            self._strategy_infos_by_name[info.name] = info
+            self._selected_strat_names = [info.name]
+            self._cur_strat_name = info.name
+            self.available_strategies = self._list_strats()
+            self._strat_btn.text = f"策略(1): {info.name}"
+            self._save()
+            if not silent:
+                self._pop("成功", f"已加载: {info.name}")
         except Exception as e:
             if not silent: self._pop("错误", f"加载失败: {e}")
 
@@ -1305,4 +1327,4 @@ if __name__ == '__main__':
                 return r
         ErrApp().run()
     else:
-        App().run()
+        CryptoScannerApp().run()

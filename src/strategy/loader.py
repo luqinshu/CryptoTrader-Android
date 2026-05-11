@@ -56,6 +56,10 @@ class StrategyInfo:
                 print(f"[策略加载] {file_path} 执行失败: {e}")
                 return None
             self.module = module
+
+            exported_class = getattr(module, "STRATEGY_CLASS", None)
+            if inspect.isclass(exported_class):
+                return exported_class(config or {})
             
             # 自动查找策略类
             strategy_class = None
@@ -122,8 +126,13 @@ class StrategyLoader:
 
         # 扫描策略目录
         for root, dirs, files in os.walk(self.strategies_dir):
-            # 跳过 __pycache__ 等目录
-            if '__pycache__' in root or root.startswith('.'):
+            # 跳过 __pycache__、隐藏目录和内部辅助目录
+            dirs[:] = [
+                d for d in dirs
+                if d != '__pycache__' and not d.startswith('.') and not d.startswith('_')
+            ]
+            base_root = os.path.basename(root)
+            if base_root == '__pycache__' or base_root.startswith('.') or base_root.startswith('_'):
                 continue
 
             for file in files:
@@ -173,12 +182,21 @@ class StrategyLoader:
                         elif '版本:' in line or 'Version:' in line:
                             version = line.split(':', 1)[1].strip()
 
-            # 判断策略类型
+            # 判断策略类型：优先读取文件内 STRATEGY_TYPE 变量，再回退到文件名推断
             strategy_type = StrategyType.TRADE
-            if 'scan' in file_path.lower() or '扫描' in file_path:
-                strategy_type = StrategyType.SCAN
-            elif 'backtest' in file_path.lower() or '回测' in file_path:
-                strategy_type = StrategyType.BACKTEST
+            import re as _re
+            _st_match = _re.search(r'STRATEGY_TYPE\s*=\s*["\'](\w+)["\']', content)
+            if _st_match:
+                _st_val = _st_match.group(1).lower()
+                if _st_val == "scan":
+                    strategy_type = StrategyType.SCAN
+                elif _st_val in ("backtest", "back_test"):
+                    strategy_type = StrategyType.BACKTEST
+            else:
+                if 'scan' in file_path.lower() or '扫描' in file_path:
+                    strategy_type = StrategyType.SCAN
+                elif 'backtest' in file_path.lower() or '回测' in file_path:
+                    strategy_type = StrategyType.BACKTEST
 
             # 尝试提取配置模式
             config_schema = self._extract_config_schema(content)
@@ -370,6 +388,10 @@ class StrategyLoader:
             # 如果指定了类名，直接获取
             if class_name:
                 return getattr(module, class_name, None)
+
+            exported_class = getattr(module, "STRATEGY_CLASS", None)
+            if inspect.isclass(exported_class):
+                return exported_class
 
             # 自动查找策略类
             for name, obj in inspect.getmembers(module, inspect.isclass):

@@ -126,9 +126,12 @@ class ScanEngine:
             extra_data={'vol24h': vol_24h_raw, 'open24h': ticker.get('open24h', 0)}
         )
 
-    def get_klines_batch(self, inst_ids: List[str], bars: List[str], limit: int = 50, max_workers: int = 6, progress_callback=None) -> Dict[str, Dict[str, List]]:
-        """批量获取 K 线数据 - 并发优化版，支持重试机制"""
+    def get_klines_batch(self, inst_ids: List[str], bars: List[str], limit: int = 50, max_workers: int = 6, progress_callback=None, bar_limits: Dict[str, int] = None) -> Dict[str, Dict[str, List]]:
+        """批量获取 K 线数据 - 并发优化版，支持重试机制。
+        bar_limits: 每个周期单独的 limit，如 {"1D": 300, "1H": 200}，未指定周期回退到 limit。
+        """
         results = {inst_id: {} for inst_id in inst_ids}
+        _bar_limits = bar_limits or {}
 
         print(f"[get_klines_batch] 开始获取 K 线: {len(inst_ids)} 个交易对 × {len(bars)} 个周期 (并发数: {max_workers})")
 
@@ -138,12 +141,13 @@ class ScanEngine:
             for bar in bars:
                 if self._stop_requested.is_set():
                     break
+                bar_limit = _bar_limits.get(bar, limit)
                 success = False
                 for attempt in range(max_retries + 1):
                     if self._stop_requested.is_set():
                         break
                     try:
-                        res = self.okx_client.get_kline(inst_id, bar=bar, limit=limit)
+                        res = self.okx_client.get_kline(inst_id, bar=bar, limit=bar_limit)
                         if res and res.get('code') == '0':
                             data = res.get('data', [])
                             if data:
@@ -328,13 +332,11 @@ class ScanEngine:
 
         def emit_result(res):
             # ── HIGH-2 FIX：市场状态自适应分数门槛过滤 ──────────────────────
-            # _market_state_min_score 在市场状态检测后被注入 strategy.config；
-            # 震荡/高波动市场时自动过滤低分信号，减少假突破入场。
             _ms_min = getattr(strategy, 'config', {}).get('_market_state_min_score')
             if _ms_min is not None:
                 _res_score = float(res.get('score', res.get('composite_score', 0)) or 0)
                 if _res_score < _ms_min:
-                    return   # 信号分数不足，静默过滤
+                    return
             if result_callback:
                 result_callback(res)
 
@@ -499,7 +501,13 @@ class ScanEngine:
                     return []
                 inst_ids = [s.inst_id for s in kline_symbols]
 
-                klines_data = self.get_klines_batch(inst_ids, bars, limit=200, progress_callback=emit_progress)
+                # 若策略声明了每周期所需根数，则分别使用；否则统一 200
+                _bar_limits = getattr(strategy, 'required_bars_limits', None) or {}
+                klines_data = self.get_klines_batch(
+                    inst_ids, bars, limit=200,
+                    bar_limits=_bar_limits,
+                    progress_callback=emit_progress,
+                )
 
                 kline_map = {s.inst_id: s for s in symbols}
                 success_count = 0
@@ -575,7 +583,7 @@ class ScanEngine:
                     # 恢复原始方法
                     strategy.scan_all_symbols = original_scan_all
 
-                print(f"[run_scan] 批量扫描返回结果：{batch_result.get('type', 'unknown')}")
+                print(f"[run_scan] 批量扫描完成: type={batch_result.get('type','unknown')}, 信号数={len(batch_result.get('all_opportunities',[]))}")
                 
                 # 转换批量结果为引擎格式
                 if 'top_gainers' in batch_result:

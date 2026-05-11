@@ -49,12 +49,516 @@ except Exception:
     _HAS_BASE = _HAS_SCANNER_BASE
 
 from strategies._shared.indicators import (
-    _to_df, _aggregate_bars, _ema, _rsi, _rsi_wilder, _adx, _efficiency_ratio,
+    _to_df, _aggregate_bars, _ema, _rsi_wilder, _adx, _efficiency_ratio,
     _volume_zscore, _robust_zscore, _measure_trend_age, _micro_pullback_continuation,
     _safe_float, _clamp, _calc_atr, _calc_volume_delta, _calc_vwap,
     _pct_change, _cfg_float,
 )
 
+# v6.0 合并文件遗留 bug 修复：子策略 1459/2227/3270/3271/3305 行使用 _rsi（无前缀），
+# 但合并文件只导入了 _rsi_wilder。补一个别名让子策略代码可以直接调用 _rsi。
+_rsi = _rsi_wilder
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# v6.0 启动+回调精准捕捉补丁 (Trend-Start & Pullback-Reentry Patch)
+# ────────────────────────────────────────────────────────────────────────────
+# 解决以下问题：
+#   1. 旧 _measure_trend_age 只看 EMA 排列 → 老趋势横盘时年龄一直递增
+#   2. trend_quality / early_trend_trigger 老趋势分数高，与"早期捕捉"目标冲突
+#   3. 突破/回调阈值未做 ATR 归一化 → 跨币种筛选严重不公平
+#   4. 3m 回调企稳的 vol_min_ratio=0.78 把"健康缩量回调"全部排除
+# 设计目标：
+#   - 真正区分"刚启动 / 回调企稳 / 老趋势 / 震荡"四态
+#   - ATR 自适应阈值，让 BTC 和山寨币用同一个标准
+#   - 不依赖 3m 也能识别 H1 级别的"刚启动 / 刚企稳"
+# ════════════════════════════════════════════════════════════════════════════
+
+def _atr_pct_quick(df: pd.DataFrame, period: int = 14) -> float:
+    """通用 ATR% 计算，数据不足时返回 1.5（典型加密币波动）。"""
+    try:
+        if df is None or len(df) < period + 2:
+            return 1.5
+        pc = df['c'].shift(1)
+        tr = pd.concat([
+            (df['h'] - df['l']).abs(),
+            (df['h'] - pc).abs(),
+            (df['l'] - pc).abs(),
+        ], axis=1).max(axis=1)
+        atr = float(tr.ewm(alpha=1.0 / period, adjust=False).mean().iloc[-1] or 0.0)
+        last = float(df['c'].iloc[-1] or 0.0)
+        if last <= 0 or atr <= 0:
+            return 1.5
+        return float(atr / last * 100.0)
+    except Exception:
+        return 1.5
+
+
+def _measure_trend_age_v2(
+    close: pd.Series, fast: int = 12, slow: int = 34,
+    atr_pct: float = 1.5, direction: float = 0.0, max_age: int = 120,
+) -> int:
+    """改进版趋势年龄计算。
+
+    关键改进：
+      1. 仅当 EMA 排列 + EMA 间距单调扩张 + 收盘配合方向 时才计入"年龄"
+      2. 横盘震荡（gap 不再扩张）→ 年龄停止累计
+      3. ATR 归一化最小 gap 阈值，避免低波动币种误判
+      4. direction=0 时返回 0（不强制方向），由调用方保证 direction 明确
+
+    Args:
+        close: 1H 收盘序列
+        fast/slow: EMA 周期
+        atr_pct: H1 ATR%（用于归一化）
+        direction: >0 多头 / <0 空头 / 0 不明
+        max_age: 最大回溯
+    """
+    if len(close) < slow + 5:
+        return 0
+    if abs(direction) < 1e-6:
+        return 0
+    ema_f = close.ewm(span=fast, adjust=False).mean()
+    ema_s = close.ewm(span=slow, adjust=False).mean()
+    diff = (ema_f - ema_s).values
+    closes = close.values
+    direction_up = direction > 0
+    # gap 阈值：至少 0.15 × ATR%，否则视为"贴线"震荡
+    min_gap_pct = max(0.05, atr_pct * 0.15)
+    age = 0
+    prev_abs_gap = None
+    consecutive_shrink = 0  # 连续 gap 收缩根数（用于检测趋势衰竭）
+    for i in range(len(diff) - 1, max(len(diff) - max_age - 1, -1), -1):
+        d = float(diff[i])
+        c = float(closes[i])
+        ema_f_i = float(ema_f.iloc[i])
+        ema_s_i = float(ema_s.iloc[i])
+        # 排列条件
+        if direction_up:
+            arr_ok = (d > 0) and (c > ema_s_i)  # 多头：EMA fast > slow，且收盘在 slow 上方
+        else:
+            arr_ok = (d < 0) and (c < ema_s_i)
+        if not arr_ok:
+            break
+        # gap 阈值：当前 gap 必须 ≥ 最小阈值
+        cur_abs_gap_pct = abs(d) / max(abs(ema_s_i), 1e-9) * 100.0
+        if cur_abs_gap_pct < min_gap_pct * 0.4:  # 太接近 → 等同震荡，不计入
+            # 但允许"刚刚交叉但 gap 还小"的初期：若 i 是最近 3 根，仍计入
+            if (len(diff) - 1 - i) > 3:
+                break
+        # gap 单调扩张检查（趋势加速）
+        if prev_abs_gap is not None:
+            if cur_abs_gap_pct < prev_abs_gap * 0.85:
+                consecutive_shrink += 1
+                # 连续 3 根 gap 收缩 → 视为趋势衰竭，不再计入
+                if consecutive_shrink >= 3:
+                    break
+            else:
+                consecutive_shrink = 0
+        prev_abs_gap = cur_abs_gap_pct
+        age += 1
+    return age
+
+
+def _h1_fresh_trend_start(h1: pd.DataFrame, atr_pct: float = 1.5) -> Dict[str, Any]:
+    """检测 H1 级别"趋势刚启动"。
+
+    满足任意一类即视为启动：
+      A. EMA12/EMA34 在最近 2-6 根内交叉，且当前 close 与方向一致
+      B. 长时间盘整后，最近 3 根连续突破（前 12 根震荡区间）
+
+    所有阈值用 ATR% 归一化，跨币种公平。
+
+    Returns:
+        {
+          'is_starting': bool, 'direction': 'BUY'/'SELL'/'NONE',
+          'confidence': 0.0~1.0, 'age': int (启动后过去多少根),
+          'components': {...诊断信息...},
+        }
+    """
+    out = {
+        'is_starting': False, 'direction': 'NONE',
+        'confidence': 0.0, 'age': 0,
+        'components': {},
+    }
+    if h1 is None or len(h1) < 50:
+        out['components']['reason'] = '1H数据不足(<50根)'
+        return out
+    try:
+        close = h1['c'].astype(float)
+        high = h1['h'].astype(float)
+        low = h1['l'].astype(float)
+        vol = h1['vol'].astype(float) if 'vol' in h1.columns else pd.Series(np.ones(len(close)), index=close.index)
+        if float(close.iloc[-1]) <= 0:
+            out['components']['reason'] = '价格无效'
+            return out
+        atr = max(atr_pct, 0.3)  # 防 0
+        ema12 = close.ewm(span=12, adjust=False).mean()
+        ema21 = close.ewm(span=21, adjust=False).mean()
+        ema34 = close.ewm(span=34, adjust=False).mean()
+        cur_close = float(close.iloc[-1])
+        cur_e12 = float(ema12.iloc[-1])
+        cur_e34 = float(ema34.iloc[-1])
+        gap_pct = (cur_e12 - cur_e34) / max(abs(cur_e34), 1e-9) * 100.0
+        gap_in_atr = abs(gap_pct) / atr  # gap 折算几个 ATR
+        # ── A 路：检测最近 1-8 根 EMA12/34 金叉/死叉 ──
+        diff = (ema12 - ema34).values
+        cross_age = None
+        cross_dir = None
+        for i in range(1, min(9, len(diff))):
+            d_now = float(diff[-i])
+            d_prev = float(diff[-i - 1])
+            if d_prev <= 0 < d_now:
+                cross_age = i; cross_dir = 'BUY'; break
+            if d_prev >= 0 > d_now:
+                cross_age = i; cross_dir = 'SELL'; break
+        # ── B 路：长盘整后突破 ──
+        # v6.0: 用 24 根盘整窗口 + 5×ATR 阈值（更宽容），并支持"最近 6 根突破"
+        if len(close) >= 30:
+            consol_window = close.iloc[-30:-6]
+            consol_high = float(consol_window.max())
+            consol_low = float(consol_window.min())
+            consol_range_pct = (consol_high - consol_low) / max(consol_low, 1e-9) * 100.0
+            consol_range_in_atr = consol_range_pct / atr
+            # 震荡基线判定放宽到 5×ATR（高波动币种也能算盘整）
+            is_consol = consol_range_in_atr <= 5.0
+            recent_6_high = float(high.iloc[-6:].max())
+            recent_6_low = float(low.iloc[-6:].min())
+            breakout_up = is_consol and (cur_close > consol_high) and (recent_6_high > consol_high)
+            breakout_down = is_consol and (cur_close < consol_low) and (recent_6_low < consol_low)
+        else:
+            is_consol = False
+            breakout_up = breakout_down = False
+            consol_range_in_atr = 0.0
+        # ── 量能确认 ──
+        if len(vol) >= 13:
+            recent_vol = float(vol.iloc[-3:].mean())
+            base_vol = float(vol.iloc[-15:-3].mean())
+            vol_surge = recent_vol / max(base_vol, 1e-9) if base_vol > 0 else 1.0
+        else:
+            vol_surge = 1.0
+        vol_ok = vol_surge >= 1.15  # 放量 15% 以上
+        # ── 组装方向与置信度 ──
+        direction = 'NONE'
+        confidence = 0.0
+        starting = False
+        age = 0
+        # 路径 A：EMA 刚交叉
+        if cross_age is not None:
+            direction = cross_dir
+            age = cross_age
+            # gap 在 0.4-2.5 ATR 之间 = 刚扩散 → 高置信
+            if 0.4 <= gap_in_atr <= 2.5:
+                conf_a = 0.55 + 0.30 * (1.0 - abs(gap_in_atr - 1.2) / 1.5)
+            elif gap_in_atr < 0.4:
+                conf_a = 0.45  # 还没扩散开
+            else:
+                conf_a = max(0.20, 0.55 - (gap_in_atr - 2.5) * 0.10)  # 已扩散，开始衰减
+            # 越近越好（cross_age 1-8）
+            conf_a *= max(0.30, 1.0 - (cross_age - 1) * 0.10)
+            # 收盘必须在正确侧
+            if direction == 'BUY' and cur_close <= cur_e12:
+                conf_a *= 0.55
+            elif direction == 'SELL' and cur_close >= cur_e12:
+                conf_a *= 0.55
+            # 量能加权
+            if vol_ok:
+                conf_a = min(1.0, conf_a * 1.18)
+            confidence = max(confidence, conf_a)
+            starting = True
+        # 路径 B：盘整突破（覆盖 A 没检测到的"无明显交叉但刚启动"情况）
+        if (breakout_up or breakout_down) and (cross_age is None or confidence < 0.55):
+            b_dir = 'BUY' if breakout_up else 'SELL'
+            # 突破幅度 / ATR 越大置信越高，但太大说明"已飞远"
+            if breakout_up:
+                bo_pct = (cur_close - consol_high) / max(consol_high, 1e-9) * 100.0
+            else:
+                bo_pct = (consol_low - cur_close) / max(consol_low, 1e-9) * 100.0
+            bo_in_atr = abs(bo_pct) / atr
+            if bo_in_atr <= 0.05:
+                conf_b = 0.35  # 刚刚踩线（v6.0: 0.30→0.35，刚启动应给基础分）
+            elif 0.1 <= bo_in_atr <= 1.5:
+                conf_b = 0.60 + 0.25 * (1.0 - abs(bo_in_atr - 0.6) / 1.0)  # v6.0: 0.55→0.60
+            else:
+                # v6.0: 0.55→0.62 起点，衰减更平缓 (0.15→0.10)
+                conf_b = max(0.25, 0.62 - (bo_in_atr - 1.5) * 0.10)
+            if vol_ok:
+                conf_b = min(1.0, conf_b * 1.25)
+            if confidence == 0.0 or b_dir == direction:
+                if conf_b > confidence:
+                    confidence = conf_b
+                    direction = b_dir
+                    starting = True
+                    age = 3  # 突破至少 3 根之前还未确立
+        # 没有任何信号 → 直接返回
+        if not starting:
+            out['components'] = {
+                'gap_in_atr': round(gap_in_atr, 2),
+                'cross_age': None, 'consol_range_in_atr': round(consol_range_in_atr, 2),
+                'vol_surge': round(vol_surge, 2),
+                'reason': '无EMA交叉且未识别盘整突破',
+            }
+            return out
+        out.update({
+            'is_starting': True, 'direction': direction,
+            'confidence': round(float(confidence), 3), 'age': int(age),
+            'components': {
+                'gap_in_atr': round(gap_in_atr, 2),
+                'gap_pct': round(gap_pct, 2),
+                'cross_age': cross_age, 'cross_dir': cross_dir,
+                'consol_range_in_atr': round(consol_range_in_atr, 2) if 'consol_range_in_atr' in dir() else 0.0,
+                'breakout_up': bool(breakout_up) if 'breakout_up' in dir() else False,
+                'breakout_down': bool(breakout_down) if 'breakout_down' in dir() else False,
+                'vol_surge': round(vol_surge, 2), 'vol_ok': bool(vol_ok),
+                'atr_pct': round(atr, 2),
+            },
+        })
+        return out
+    except Exception as e:
+        out['components']['reason'] = f'计算异常:{e}'
+        return out
+
+
+def _h1_pullback_reentry(h1: pd.DataFrame, direction: str, atr_pct: float = 1.5) -> Dict[str, Any]:
+    """检测 H1 级别"回调到 EMA21 后再启动"。
+
+    满足条件：
+      ① 趋势已确立（EMA12 与 EMA34 同向，间距 0.5-3 ATR）
+      ② 最近 1-5 根 H1 的 low/high 触及 EMA21（距离 ≤ 1×ATR）
+      ③ 回踩后已反弹（多头：close > EMA12，且最近 1-2 根阳线居多）
+      ④ 回踩段量能 < 突破段量能（健康缩量回调）
+
+    与 _h1_fresh_trend_start 的区别：
+      fresh_start 抓的是"EMA 刚交叉"或"盘整突破"
+      pullback_reentry 抓的是"已确立的趋势中，刚刚回踩反弹"
+
+    Returns: {'is_reentry': bool, 'confidence': 0~1, 'retracement_age': int, 'components': {...}}
+    """
+    out = {
+        'is_reentry': False, 'confidence': 0.0,
+        'retracement_age': 0, 'components': {},
+    }
+    if h1 is None or len(h1) < 50:
+        out['components']['reason'] = '1H数据不足'
+        return out
+    direction_up = str(direction).upper() in {'BUY', 'LONG'}
+    try:
+        close = h1['c'].astype(float)
+        high = h1['h'].astype(float)
+        low = h1['l'].astype(float)
+        vol = h1['vol'].astype(float) if 'vol' in h1.columns else pd.Series(np.ones(len(close)), index=close.index)
+        atr = max(atr_pct, 0.3)
+        ema12 = close.ewm(span=12, adjust=False).mean()
+        ema21 = close.ewm(span=21, adjust=False).mean()
+        ema34 = close.ewm(span=34, adjust=False).mean()
+        cur_close = float(close.iloc[-1])
+        cur_e12 = float(ema12.iloc[-1])
+        cur_e21 = float(ema21.iloc[-1])
+        cur_e34 = float(ema34.iloc[-1])
+        gap_pct = abs(cur_e12 - cur_e34) / max(abs(cur_e34), 1e-9) * 100.0
+        gap_in_atr = gap_pct / atr
+        # ① 趋势已确立检查
+        if direction_up:
+            trend_ok = cur_e12 > cur_e34 and 0.5 <= gap_in_atr <= 3.0
+        else:
+            trend_ok = cur_e12 < cur_e34 and 0.5 <= gap_in_atr <= 3.0
+        if not trend_ok:
+            out['components'] = {
+                'gap_in_atr': round(gap_in_atr, 2),
+                'reason': f'趋势未确立或gap超范围(gap={gap_in_atr:.2f}×ATR)',
+            }
+            return out
+        # ② 检测最近 1-5 根的 EMA21 触碰
+        touch_age = None
+        touch_distance_atr = None
+        for i in range(1, min(6, len(close))):
+            ema21_i = float(ema21.iloc[-i])
+            if direction_up:
+                bar_low = float(low.iloc[-i])
+                dist_atr = (bar_low - ema21_i) / max(ema21_i, 1e-9) * 100.0 / atr
+                # 多头回踩：bar_low ≤ EMA21 + 0.3×ATR 且 ≥ EMA21 - 1.0×ATR（不能跌穿太多）
+                if -1.0 <= dist_atr <= 0.3:
+                    touch_age = i; touch_distance_atr = dist_atr; break
+            else:
+                bar_high = float(high.iloc[-i])
+                dist_atr = (bar_high - ema21_i) / max(ema21_i, 1e-9) * 100.0 / atr
+                # 空头回踩：bar_high ≥ EMA21 - 0.3×ATR 且 ≤ EMA21 + 1.0×ATR
+                if -0.3 <= dist_atr <= 1.0:
+                    touch_age = i; touch_distance_atr = dist_atr; break
+        if touch_age is None:
+            out['components'] = {
+                'gap_in_atr': round(gap_in_atr, 2),
+                'reason': '近5根未触碰EMA21',
+            }
+            return out
+        # ③ 回踩后是否已反弹
+        if direction_up:
+            rebounded = cur_close > cur_e12 * 0.999  # 已反弹回 EMA12
+            # 末2根阳线
+            bull_count = sum(1 for j in range(1, min(3, len(close))) if float(close.iloc[-j]) >= float(h1['o'].iloc[-j]))
+            rebound_strength = bull_count / 2.0
+        else:
+            rebounded = cur_close < cur_e12 * 1.001
+            bear_count = sum(1 for j in range(1, min(3, len(close))) if float(close.iloc[-j]) <= float(h1['o'].iloc[-j]))
+            rebound_strength = bear_count / 2.0
+        if not rebounded:
+            out['components'] = {
+                'gap_in_atr': round(gap_in_atr, 2),
+                'touch_age': touch_age, 'touch_distance_atr': round(touch_distance_atr, 2),
+                'reason': '已触碰EMA21但未反弹回EMA12',
+            }
+            return out
+        # ④ 回踩段量能 < 突破段量能（健康缩量回调）
+        if len(vol) >= 12:
+            recent_vol = float(vol.iloc[-touch_age:].mean()) if touch_age >= 1 else float(vol.iloc[-1])
+            prior_vol = float(vol.iloc[-(touch_age + 8):-touch_age].mean()) if touch_age >= 1 and len(vol) >= touch_age + 8 else 1.0
+            vol_shrink_ratio = recent_vol / max(prior_vol, 1e-9) if prior_vol > 0 else 1.0
+            healthy_shrink = vol_shrink_ratio <= 1.10  # 回调段量能不应明显放大
+        else:
+            vol_shrink_ratio = 1.0
+            healthy_shrink = True
+        # 综合置信度
+        # 越近越好（touch_age 越小）
+        age_factor = max(0.4, 1.0 - (touch_age - 1) * 0.12)
+        # 距离越精准越好
+        dist_factor = max(0.5, 1.0 - abs(touch_distance_atr) * 0.4)
+        # 量能健康
+        vol_factor = 1.15 if healthy_shrink else 0.75
+        # gap 在 0.7-1.8 ATR = 黄金区间
+        if 0.7 <= gap_in_atr <= 1.8:
+            gap_factor = 1.10
+        elif gap_in_atr < 0.7:
+            gap_factor = 0.85
+        else:
+            gap_factor = max(0.55, 1.0 - (gap_in_atr - 1.8) * 0.18)
+        confidence = min(1.0, 0.55 * age_factor * dist_factor * vol_factor * gap_factor + 0.10 * rebound_strength)
+        out.update({
+            'is_reentry': True,
+            'confidence': round(float(confidence), 3),
+            'retracement_age': int(touch_age),
+            'components': {
+                'gap_in_atr': round(gap_in_atr, 2),
+                'touch_age': touch_age,
+                'touch_distance_atr': round(float(touch_distance_atr), 2),
+                'vol_shrink_ratio': round(float(vol_shrink_ratio), 2),
+                'rebound_strength': round(float(rebound_strength), 2),
+                'healthy_shrink': bool(healthy_shrink),
+                'atr_pct': round(atr, 2),
+            },
+        })
+        return out
+    except Exception as e:
+        out['components']['reason'] = f'计算异常:{e}'
+        return out
+
+
+def _atr_normalized_threshold(base_pct: float, atr_pct: float,
+                               min_floor: float = 0.10, max_ceil: float = 5.0) -> float:
+    """把固定百分比阈值（如 0.65%）按 ATR 归一化。
+
+    base_pct: 标准阈值（基于"中等波动 1.5% ATR"假设）
+    atr_pct: 当前品种 ATR%
+    返回：跨币种公平的实际阈值
+    """
+    if atr_pct <= 0.1:
+        return base_pct
+    # 以 1.5% ATR 为基准，等比放大
+    scale = atr_pct / 1.5
+    adjusted = base_pct * scale
+    return float(_clamp(adjusted, min_floor, max_ceil))
+
+
+def _h1_starter_signal(h1: pd.DataFrame, direction_hint: str = '') -> Dict[str, Any]:
+    """组合"刚启动"+"刚回调企稳"两个信号，返回最佳启动入场结论。
+
+    direction_hint: 可选 'BUY'/'SELL'，若提供则只检测该方向。
+
+    Returns: {
+        'has_signal': bool, 'signal_type': 'fresh_start' / 'pullback_reentry' / 'none',
+        'direction': 'BUY'/'SELL'/'NONE', 'confidence': 0~1, 'detail': str,
+        'fresh_start': dict, 'pullback': dict, 'atr_pct': float,
+    }
+    """
+    out = {
+        'has_signal': False, 'signal_type': 'none',
+        'direction': 'NONE', 'confidence': 0.0, 'detail': '',
+        'fresh_start': {}, 'pullback': {}, 'atr_pct': 0.0,
+    }
+    if h1 is None or len(h1) < 50:
+        out['detail'] = '1H数据不足'
+        return out
+    atr_pct = _atr_pct_quick(h1, 14)
+    out['atr_pct'] = round(float(atr_pct), 2)
+    fs = _h1_fresh_trend_start(h1, atr_pct)
+    out['fresh_start'] = fs
+    # v6.0 重要：fresh_start 检测的是"刚启动事件"，比当前 EMA 排列更新（趋势反转场景）
+    # 决定 pullback 检测方向：direction_hint > fresh_start 自带方向 > EMA 当前排列
+    if direction_hint and direction_hint.upper() in {'BUY', 'SELL'}:
+        target_dir = direction_hint.upper()
+    elif fs.get('is_starting'):
+        target_dir = fs.get('direction', 'NONE')
+    else:
+        try:
+            close = h1['c'].astype(float)
+            e12 = float(close.ewm(span=12, adjust=False).mean().iloc[-1])
+            e34 = float(close.ewm(span=34, adjust=False).mean().iloc[-1])
+            if e12 > e34 * 1.001:
+                target_dir = 'BUY'
+            elif e12 < e34 * 0.999:
+                target_dir = 'SELL'
+            else:
+                target_dir = ''
+        except Exception:
+            target_dir = ''
+    pb = {}
+    if target_dir in {'BUY', 'SELL'}:
+        pb = _h1_pullback_reentry(h1, target_dir, atr_pct)
+        out['pullback'] = pb
+    # v6.0 重要：始终信任 fresh_start 自带方向
+    # 即使与 direction_hint（基于4H）相反——这恰是"趋势反转启动"场景，价值最高
+    fs_conf = float(fs.get('confidence', 0.0)) if fs.get('is_starting') else 0.0
+    pb_conf = float(pb.get('confidence', 0.0)) if pb.get('is_reentry') else 0.0
+    # v6.0: has_signal 阈值=0.30 — 早期捕捉应宽容；下游评分/绿色通道再用 starter_min_confidence 二次过滤
+    has_signal_thr = 0.30
+    if fs_conf >= pb_conf and fs_conf >= has_signal_thr:
+        out['has_signal'] = True
+        out['signal_type'] = 'fresh_start'
+        out['direction'] = fs.get('direction', 'NONE')
+        out['confidence'] = fs_conf
+        out['detail'] = (
+            f"H1趋势刚启动 conf={fs_conf:.2f} "
+            f"gap={fs['components'].get('gap_in_atr',0):.1f}×ATR "
+            f"cross_age={fs['components'].get('cross_age')}"
+        )
+    elif pb_conf >= has_signal_thr:
+        out['has_signal'] = True
+        out['signal_type'] = 'pullback_reentry'
+        out['direction'] = target_dir
+        out['confidence'] = pb_conf
+        out['detail'] = (
+            f"H1回调EMA21后再启动 conf={pb_conf:.2f} "
+            f"touch_age={pb.get('retracement_age')} "
+            f"vol缩比={pb['components'].get('vol_shrink_ratio',1):.2f}"
+        )
+    else:
+        out['detail'] = 'H1启动/回调企稳信号均未达阈值'
+    return out
+
+
+def _is_data_fresh(klines: List, max_lag_minutes: float = 90.0) -> bool:
+    """检查 K 线最后 ts 距今是否在 max_lag_minutes 内（防止用过期数据误判）。"""
+    if not klines or not isinstance(klines, (list, tuple)):
+        return True  # 无法验证时不阻断
+    try:
+        last_ts = float(klines[-1][0])
+        # ts 单位检测：若 > 1e12 视为毫秒，否则视为秒
+        if last_ts > 1e12:
+            last_ts = last_ts / 1000.0
+        import time as _time
+        now = _time.time()
+        lag_sec = now - last_ts
+        return lag_sec <= max_lag_minutes * 60.0
+    except Exception:
+        return True
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -62,14 +566,19 @@ from strategies._shared.indicators import (
 # ════════════════════════════════════════════════════════════════════════════
 
 _cs1_CONFIG_SCHEMA = {
-    'min_score':              {'type':'float','default':72.0,      'label':'最低扫描分数'},
-    'backtest_min_score':     {'type':'float','default':70.0,      'label':'回测最低入场分数'},
-    'min_volume_24h':         {'type':'float','default':8_000_000, 'label':'最小24H成交额'},
-    'top_n_long':             {'type':'int',  'default':12,        'label':'截面多头保留'},
-    'top_n_short':            {'type':'int',  'default':8,         'label':'截面空头保留'},
+    'min_score':              {'type':'float','default':76.0,      'label':'最低扫描分数(v6.1: 72→76)'},
+    'backtest_min_score':     {'type':'float','default':72.0,      'label':'回测最低入场分数'},
+    'min_volume_24h':         {'type':'float','default':10_000_000,'label':'最小24H成交额(v6.1: 8M→10M)'},
+    'top_n_long':             {'type':'int',  'default':6,         'label':'截面多头保留(v6.1: 12→6)'},
+    'top_n_short':            {'type':'int',  'default':4,         'label':'截面空头保留(v6.1: 8→4)'},
     'allow_short':            {'type':'bool', 'default':True,      'label':'允许空头'},
-    'min_abs_edge':           {'type':'float','default':0.38,      'label':'最小绝对优势'},
+    'min_abs_edge':           {'type':'float','default':0.50,      'label':'最小绝对优势(v6.1: 0.38→0.50)'},
     'max_atr_pct':            {'type':'float','default':7.5,       'label':'最大4H ATR%'},
+    # v6.1 老趋势过滤：7D 动量过大说明已经飞远，多空都该排除（除非有 H1 启动绿色通道）
+    'mom_1d_extreme_threshold_pct': {'type':'float','default':12.0, 'label':'7D动量绝对值阈值（超此视为老趋势）'},
+    'mom_1d_extreme_penalty': {'type':'float','default':10.0,      'label':'老趋势score惩罚（无启动信号时）'},
+    'mom_1d_hard_filter_pct': {'type':'float','default':25.0,      'label':'7D动量硬上限（无论是否有启动信号都拒绝）'},
+    'direction_consistency_check': {'type':'bool','default':True,  'label':'要求4H与1H动量方向一致或H1启动同向'},
     'use_dynamic_ic_weights': {'type':'bool', 'default':True,      'label':'启用动态IC权重'},
     'ic_lookback_points':     {'type':'int',  'default':42,        'label':'IC回看截面数'},
     'ic_forward_bars':        {'type':'int',  'default':6,         'label':'IC未来收益窗口'},
@@ -104,12 +613,16 @@ _cs1_CONFIG_SCHEMA = {
     'enable_bidask_spread_filter':{'type':'bool','default':True,   'label':'启用买卖价差过滤'},
     'max_bidask_spread_pct':     {'type':'float','default':0.25,  'label':'最大允许买卖价差%'},
     # v4.1 趋势早期捕捉
-    'h1_trend_age_hard_limit':   {'type':'int',  'default':20,     'label':'1H趋势硬过滤上限（超过直接排除，0=不限）'},
+    'h1_trend_age_hard_limit':   {'type':'int',  'default':16,     'label':'1H趋势硬过滤上限(v6.1: 20→16)'},
     'require_early_trend_entry': {'type':'bool', 'default':False,  'label':'只接受趋势早期信号（trend_age<=max_h1_trend_age）'},
-    'early_trend_edge_discount': {'type':'float','default':0.06,   'label':'早期趋势降低min_abs_edge的折扣量'},
+    'early_trend_edge_discount': {'type':'float','default':0.03,   'label':'早期趋势降低min_abs_edge的折扣量(v6.1: 0.06→0.03)'},
     'position_size':          {'type':'float','default':0.1,       'label':'回测仓位比例'},
     'take_profit_pct':        {'type':'float','default':5.5,       'label':'止盈%'},
     'stop_loss_pct':          {'type':'float','default':3.2,       'label':'止损%'},
+    # v6.0 启动+回调精准捕捉
+    'h1_starter_signal_enabled': {'type':'bool', 'default':True,  'label':'启用H1启动信号绿色通道'},
+    'h1_starter_min_confidence': {'type':'float','default':0.45,  'label':'启动信号最低置信度'},
+    'h1_starter_skip_m3_filter': {'type':'bool', 'default':True,  'label':'启动信号同向时豁免3m硬过滤'},
 }
 _cs1__DEFAULT_CONFIG = {k: v['default'] for k, v in _cs1_CONFIG_SCHEMA.items()}
 
@@ -168,6 +681,14 @@ class FactorSnapshot:
         'm3_staleness_bars',  # v3fix: 回调时效性
         'h1_trend_age',       # v3.1: 1H趋势延续根数
         'ema_cross_signal',   # v4.1: 1H EMA金叉/死叉信号
+        # v6.0 启动+回调精准捕捉
+        'h1_atr_pct',                # H1 ATR% (用于 ATR 归一化)
+        'h1_starter_signal_type',    # 'fresh_start' / 'pullback_reentry' / 'none'
+        'h1_starter_confidence',     # 0~1
+        'h1_starter_direction',      # 'BUY' / 'SELL' / 'NONE'
+        'h1_fresh_start_conf',       # 仅"刚启动"置信度
+        'h1_pullback_reentry_conf',  # 仅"回调企稳"置信度
+        'h1_starter_detail',         # 文字描述
     )
     def __init__(self, **kw):
         for s in self.__slots__:
@@ -255,14 +776,33 @@ class ACrossSectionalMultiFactorScannerStrategy(BaseScannerStrategy if _HAS_SCAN
         hard_atr = float(self.config.get('max_atr_pct',7.5))
 
         ranked_long = long_edge.sort_values(ascending=False)
-        for rank, sn in enumerate(ranked_long.head(int(self.config.get('top_n_long',12))).index, 1):
+        # v6.1: 7D 硬上限 + 方向一致性
+        hard_1d = float(self.config.get('mom_1d_hard_filter_pct', 25.0))
+        require_dir_consist = bool(self.config.get('direction_consistency_check', True))
+        for rank, sn in enumerate(ranked_long.head(int(self.config.get('top_n_long',6))).index, 1):
             snap = snap_map.get(sn)
             if not snap or snap.atr_pct > hard_atr: continue
             early_ok = snap.early_trend_trigger >= float(self.config.get('early_trend_min_trigger',0.18))
             ema_cross_ok = abs(_safe_float(getattr(snap,'ema_cross_signal',0.0),0.0)) >= 0.5
-            if snap.momentum_4h <= 0 and snap.momentum_1d <= 2 and not early_ok and not ema_cross_ok: continue
-            # v3: 动量衰减过滤
-            if snap.momentum_decay < -3.0 and not early_ok and not ema_cross_ok: continue
+            # v6.0: H1 启动信号也是"绿色通道"
+            starter_buy_ok = (str(getattr(snap, 'h1_starter_signal_type', 'none')) in ('fresh_start','pullback_reentry')
+                              and str(getattr(snap, 'h1_starter_direction', '')) == 'BUY'
+                              and _safe_float(getattr(snap, 'h1_starter_confidence', 0.0), 0.0) >= 0.55)
+            green_channel = early_ok or ema_cross_ok or starter_buy_ok
+            # v6.1: 7D 动量硬上限 — 老趋势末端不进
+            if snap.momentum_1d > hard_1d and not starter_buy_ok:
+                continue
+            # v6.1: 方向一致性 — 1H/4H/1D 至少 2 个同向，或 H1 启动信号同向
+            if require_dir_consist and not starter_buy_ok:
+                bull_votes = (1 if snap.momentum_1h > 0 else 0) + (1 if snap.momentum_4h > 0 else 0) + (1 if snap.momentum_1d > 0 else 0)
+                if bull_votes < 2:
+                    continue
+                # 1H/4H 反向（一涨一跌）的"撕裂"形态过滤掉
+                if snap.momentum_1h * snap.momentum_4h < -0.5:  # 1H 与 4H 方向冲突且幅度都明显
+                    continue
+            if snap.momentum_4h <= 0 and snap.momentum_1d <= 2 and not green_channel: continue
+            # v3: 动量衰减过滤（绿色通道豁免）
+            if snap.momentum_decay < -3.0 and not green_channel: continue
             # v4.1: 硬年龄上限（超过直接排除，避免在老趋势末端建仓）
             hard_limit = int(_safe_float(self.config.get('h1_trend_age_hard_limit', 20), 20))
             if hard_limit > 0 and snap.h1_trend_age > hard_limit: continue
@@ -274,8 +814,8 @@ class ACrossSectionalMultiFactorScannerStrategy(BaseScannerStrategy if _HAS_SCAN
             if snap.h1_trend_age > max_age * 2 and snap.m3_staleness_bars > max_stale: continue
             edge = float(long_edge.loc[sn])
             score = _cs1__edge_to_score(edge, snap)
-            # v4.1: 早期趋势（trend_age 在正常范围内或刚金叉）降低 min_edge 门槛
-            is_early = snap.h1_trend_age <= max_age or ema_cross_ok
+            # v6.0: 早期判定纳入"H1 启动信号"，启动期享受 edge 折扣
+            is_early = (snap.h1_trend_age <= max_age) or ema_cross_ok or starter_buy_ok
             discount = float(self.config.get('early_trend_edge_discount', 0.06)) if is_early else 0.0
             if edge < min_edge - discount or score < min_score: continue
             results.append(_build_scan_result(snapshot=snap,score=score,direction='BUY',edge=edge,
@@ -284,13 +824,28 @@ class ACrossSectionalMultiFactorScannerStrategy(BaseScannerStrategy if _HAS_SCAN
 
         if allow_short:
             short_edge = -long_edge
-            for rank, sn in enumerate(short_edge.sort_values(ascending=False).head(int(self.config.get('top_n_short',8))).index, 1):
+            for rank, sn in enumerate(short_edge.sort_values(ascending=False).head(int(self.config.get('top_n_short',4))).index, 1):
                 snap = snap_map.get(sn)
                 if not snap or snap.atr_pct > hard_atr: continue
                 early_ok = snap.early_trend_trigger <= -float(self.config.get('early_trend_min_trigger',0.18))
                 ema_cross_ok_s = _safe_float(getattr(snap,'ema_cross_signal',0.0),0.0) <= -0.5
-                if snap.momentum_4h >= 0 and snap.momentum_1d >= -3 and not early_ok and not ema_cross_ok_s: continue
-                if snap.momentum_decay > 3.0 and not early_ok and not ema_cross_ok_s: continue
+                # v6.0: H1 启动信号绿色通道
+                starter_sell_ok = (str(getattr(snap, 'h1_starter_signal_type', 'none')) in ('fresh_start','pullback_reentry')
+                                   and str(getattr(snap, 'h1_starter_direction', '')) == 'SELL'
+                                   and _safe_float(getattr(snap, 'h1_starter_confidence', 0.0), 0.0) >= 0.55)
+                green_channel_s = early_ok or ema_cross_ok_s or starter_sell_ok
+                # v6.1: 7D 跌幅硬上限 — 已经跌很多的不再追空
+                if snap.momentum_1d < -hard_1d and not starter_sell_ok:
+                    continue
+                # v6.1: 方向一致性
+                if require_dir_consist and not starter_sell_ok:
+                    bear_votes = (1 if snap.momentum_1h < 0 else 0) + (1 if snap.momentum_4h < 0 else 0) + (1 if snap.momentum_1d < 0 else 0)
+                    if bear_votes < 2:
+                        continue
+                    if snap.momentum_1h * snap.momentum_4h < -0.5:
+                        continue
+                if snap.momentum_4h >= 0 and snap.momentum_1d >= -3 and not green_channel_s: continue
+                if snap.momentum_decay > 3.0 and not green_channel_s: continue
                 # v4.1: 硬年龄上限
                 hard_limit_s = int(_safe_float(self.config.get('h1_trend_age_hard_limit', 20), 20))
                 if hard_limit_s > 0 and snap.h1_trend_age > hard_limit_s: continue
@@ -300,7 +855,8 @@ class ACrossSectionalMultiFactorScannerStrategy(BaseScannerStrategy if _HAS_SCAN
                 if snap.h1_trend_age > max_age_s * 2 and snap.m3_staleness_bars > max_stale_s: continue
                 edge = float(short_edge.loc[sn])
                 score = _cs1__edge_to_score(edge, snap)
-                is_early_s = snap.h1_trend_age <= max_age_s or ema_cross_ok_s
+                # v6.0: 启动信号也算 early
+                is_early_s = (snap.h1_trend_age <= max_age_s) or ema_cross_ok_s or starter_sell_ok
                 discount_s = float(self.config.get('early_trend_edge_discount', 0.06)) if is_early_s else 0.0
                 if edge < min_edge - discount_s or score < min_score: continue
                 results.append(_build_scan_result(snapshot=snap,score=score,direction='SELL',edge=edge,
@@ -653,9 +1209,12 @@ def _orthogonalize_factors(factor_frame: pd.DataFrame) -> pd.DataFrame:
             S_inv = np.diag(1.0 / np.maximum(S, 1e-8))
             whitened = U @ S_inv @ Vt
         # 还原原始量纲（保持方差量级大致不变）
+        # v6.1 修复 RuntimeWarning: np.where 仍会先计算除法（即使 mask=False），
+        # 当 whitened_std=0 时产生 inf/NaN 警告。改用 np.divide(out=, where=) 完全跳过 0 项。
         orig_std = np.nanstd(sub_filled, axis=0)
         whitened_std = np.nanstd(whitened, axis=0)
-        scale = np.where(whitened_std > 1e-12, orig_std / whitened_std, 1.0)
+        scale = np.ones_like(orig_std)
+        np.divide(orig_std, whitened_std, out=scale, where=whitened_std > 1e-12)
         whitened = whitened * scale
         for i, col in enumerate(cols):
             df[col] = whitened[:, i]
@@ -780,8 +1339,14 @@ def _cs1__build_snapshot(symbol, config) -> FactorSnapshot:
     db = ('BUY' if ema21>=ema55 and m4h>=0 else 'SELL' if ema21<ema55 and m4h<0 else 'WAIT')
     trend_hint = 1.0 if db == 'BUY' else -1.0 if db == 'SELL' else 0.0
 
-    # v3.1: 1H 趋势时效性（在 db 确定后计算）
-    h1_trend_age = _measure_trend_age(h1['c'], fast=12, slow=34, direction=trend_hint)
+    # v6.0 启动+回调精准捕捉：先算 H1 ATR%，再用 v2 趋势年龄
+    h1_atr_pct = _atr_pct_quick(h1, 14)
+    h1_trend_age = _measure_trend_age_v2(h1['c'], fast=12, slow=34,
+                                          atr_pct=h1_atr_pct, direction=trend_hint)
+    # 保留旧字段供其它代码兼容（旧版年龄）
+    h1_trend_age_legacy = _measure_trend_age(h1['c'], fast=12, slow=34, direction=trend_hint)
+    # v6.0: H1 启动/回调企稳综合信号
+    starter = _h1_starter_signal(h1, direction_hint=db if db in {'BUY','SELL'} else '')
 
     # v4.0: 买卖价差过滤 — 价差过大说明流动性差，3m信号质量低
     if bool(config.get('enable_bidask_spread_filter', True)):
@@ -796,9 +1361,38 @@ def _cs1__build_snapshot(symbol, config) -> FactorSnapshot:
                         reason=f"买卖价差过大({spread_pct:.2f}%)，流动性不足", direction_bias='WAIT')
 
     micro_confirm = _micro_pullback_continuation(m3, trend_hint, config)
-    if bool(config.get('require_m3_pullback_confirmation', True)) and not micro_confirm['confirmed']:
+    # v6.0: H1 启动信号自身方向明确且置信高 → 豁免 3m 阻断（"刚启动还没形成3m回调"是正常的）
+    # 注意：不要求 db == starter direction，因为 db 基于 4H，可能滞后
+    starter_high_conf = (
+        str(starter.get('signal_type', 'none')) in ('fresh_start', 'pullback_reentry')
+        and str(starter.get('direction', 'NONE')) in {'BUY', 'SELL'}
+        and float(starter.get('confidence', 0.0)) >= float(config.get('h1_starter_min_confidence', 0.55))
+    )
+    skip_m3 = bool(config.get('h1_starter_skip_m3_filter', True)) and starter_high_conf
+    if (bool(config.get('require_m3_pullback_confirmation', True)) and not micro_confirm['confirmed']
+        and not skip_m3):
         return FactorSnapshot(symbol=inst, valid=False, reason=f"3分钟回调续势未确认: {micro_confirm['reason']}", direction_bias='WAIT')
+    # v6.0: 启动豁免触发时，把 db 强制对齐 starter 方向（避免下游 db='WAIT' 造成方向丢失）
+    if skip_m3 and db == 'WAIT':
+        db = str(starter.get('direction', 'WAIT'))
     fc = -abs(fr); fcn = -fr
+
+    # v6.0: 把启动信号映射成"方向化"因子（多头为正、空头为负）
+    starter_dir = starter.get('direction', 'NONE')
+    starter_conf = float(starter.get('confidence', 0.0))
+    starter_sign = 1.0 if starter_dir == 'BUY' else (-1.0 if starter_dir == 'SELL' else 0.0)
+    fresh_start_factor = starter_conf * starter_sign if starter.get('signal_type') == 'fresh_start' else 0.0
+    pullback_reentry_factor = starter_conf * starter_sign if starter.get('signal_type') == 'pullback_reentry' else 0.0
+    # 趋势新鲜度：刚启动/刚企稳为正，老趋势/震荡为负
+    max_age_cfg_for_fresh = float(config.get('max_h1_trend_age', 12) or 12)
+    if h1_trend_age <= max_age_cfg_for_fresh * 0.5:
+        trend_freshness = 1.0
+    elif h1_trend_age <= max_age_cfg_for_fresh:
+        trend_freshness = 0.5
+    elif h1_trend_age <= max_age_cfg_for_fresh * 1.5:
+        trend_freshness = -0.3
+    else:
+        trend_freshness = -0.8
 
     factors = {
         'momentum_1h':m1h,'momentum_4h':m4h,'momentum_1d':m1d,'short_reversal':sr,
@@ -815,6 +1409,10 @@ def _cs1__build_snapshot(symbol, config) -> FactorSnapshot:
         'donchian_breakout':early['donchian_breakout'],
         'volume_price_confirm':early['volume_price_confirm'],
         'ema_cross_signal':early.get('ema_cross_signal', 0.0),  # v4.1
+        # v6.0 启动+回调精准捕捉
+        'h1_fresh_start': fresh_start_factor,
+        'h1_pullback_reentry': pullback_reentry_factor,
+        'trend_freshness': trend_freshness,
         **oc,  # whale_flow, exchange_netflow, active_addresses, nvt_signal
     }
 
@@ -843,8 +1441,16 @@ def _cs1__build_snapshot(symbol, config) -> FactorSnapshot:
         m3_pullback_pct=micro_confirm['pullback_pct'],
         m3_impulse_pct=micro_confirm['impulse_pct'],
         m3_staleness_bars=micro_confirm.get('staleness_bars', 0),
-        h1_trend_age=h1_trend_age,  # v3.1
+        h1_trend_age=h1_trend_age,  # v3.1 (v6.0: 已升级为 v2 算法)
         ema_cross_signal=early.get('ema_cross_signal', 0.0),  # v4.1
+        # v6.0 启动+回调精准捕捉字段
+        h1_atr_pct=float(h1_atr_pct),
+        h1_starter_signal_type=str(starter.get('signal_type', 'none')),
+        h1_starter_confidence=float(starter.get('confidence', 0.0)),
+        h1_starter_direction=str(starter.get('direction', 'NONE')),
+        h1_fresh_start_conf=float(starter.get('fresh_start', {}).get('confidence', 0.0)) if starter.get('signal_type') == 'fresh_start' else 0.0,
+        h1_pullback_reentry_conf=float(starter.get('pullback', {}).get('confidence', 0.0)) if starter.get('signal_type') == 'pullback_reentry' else 0.0,
+        h1_starter_detail=str(starter.get('detail', '')),
     )
 
 
@@ -853,42 +1459,69 @@ def _cs1__build_snapshot(symbol, config) -> FactorSnapshot:
 # ══════════════════════════════════════════════
 def _single_asset_score(snap, config):
     max_atr = float(config.get('max_atr_pct',7.5))
-    trend_p   = _clamp(snap.trend_quality,0,100)*0.24
+    # v6.0: trend_quality 按"新鲜度"折算 — 老趋势 0.5x, 刚启动 1.2x
+    fresh_mult = 1.2 if getattr(snap, 'h1_trend_age', 0) <= float(config.get('max_h1_trend_age', 12)) * 0.5 else \
+                 (0.85 if getattr(snap, 'h1_trend_age', 0) <= float(config.get('max_h1_trend_age', 12)) else 0.55)
+    trend_p   = _clamp(snap.trend_quality,0,100)*0.20*fresh_mult
     mom_raw   = snap.momentum_4h*2+snap.momentum_1d*0.7+snap.momentum_1h
-    mom_p     = _clamp(mom_raw*3+40,0,100)*0.18
-    lowvol_p  = _clamp(100-snap.realized_vol*8,0,100)*0.08
-    vol_p     = _clamp(snap.volume_impulse/1.4*100,0,100)*0.08
-    fund_p    = _clamp(100-abs(snap.funding_rate)*450,0,100)*0.05
-    liq_p     = _clamp((snap.liquidity-14)/4*100,0,100)*0.07
-    macd_p    = _clamp(50+snap.macd_momentum*20,0,100)*0.06
-    bb_p      = _clamp(snap.bb_percentb*100,0,100)*0.03
-    eff_p     = _clamp(snap.efficiency_ratio*100,0,100)*0.04
+    mom_p     = _clamp(mom_raw*3+40,0,100)*0.14
+    lowvol_p  = _clamp(100-snap.realized_vol*8,0,100)*0.06
+    vol_p     = _clamp(snap.volume_impulse/1.4*100,0,100)*0.06
+    fund_p    = _clamp(100-abs(snap.funding_rate)*450,0,100)*0.04
+    liq_p     = _clamp((snap.liquidity-14)/4*100,0,100)*0.06
+    macd_p    = _clamp(50+snap.macd_momentum*20,0,100)*0.05
+    bb_p      = _clamp(snap.bb_percentb*100,0,100)*0.02
+    eff_p     = _clamp(snap.efficiency_ratio*100,0,100)*0.03
     rsia_p    = _clamp(snap.rsi_alignment,0,100)*0.02
     sr_p      = _clamp(50+snap.short_reversal*15,0,100)*0.03
     oi_p      = _clamp(50+snap.oi_heat*5,0,100)*0.02
-    decay_p   = _clamp(50+snap.momentum_decay*6,0,100)*0.06
-    accel_p   = _clamp(50+snap.momentum_acceleration*5,0,100)*0.04
-    # v4.1: early_p 权重从 0.07 → 0.12，turn_p 保持
-    early_p   = _clamp(50+snap.early_trend_trigger*22,0,100)*0.12
-    turn_p    = _clamp(50+snap.rsi_midline_turn*18+snap.macd_hist_turn*16,0,100)*0.04
-    whale_p   = _clamp(50+_safe_float(snap.whale_flow,0)*200,0,100)*0.03
+    decay_p   = _clamp(50+snap.momentum_decay*6,0,100)*0.05
+    accel_p   = _clamp(50+snap.momentum_acceleration*5,0,100)*0.03
+    early_p   = _clamp(50+snap.early_trend_trigger*22,0,100)*0.10
+    turn_p    = _clamp(50+snap.rsi_midline_turn*18+snap.macd_hist_turn*16,0,100)*0.03
+    whale_p   = _clamp(50+_safe_float(snap.whale_flow,0)*200,0,100)*0.02
     nvt_p     = _clamp(50+_safe_float(snap.nvt_signal,0)*10,0,100)*0.02
-    # v4.1: EMA 金叉/死叉加分（以方向计）
     ema_cross = _safe_float(getattr(snap, 'ema_cross_signal', 0.0), 0.0)
-    cross_p   = _clamp(50+ema_cross*40,0,100)*0.08
+    cross_p   = _clamp(50+ema_cross*40,0,100)*0.06
+    # v6.0: H1 启动 / 回调企稳 / 趋势新鲜度 三个新因子的分数贡献
+    h1_fresh_signed = _safe_float(getattr(snap, 'h1_fresh_start_conf', 0.0), 0.0)
+    h1_pullback_signed = _safe_float(getattr(snap, 'h1_pullback_reentry_conf', 0.0), 0.0)
+    fresh_start_p = _clamp(50 + h1_fresh_signed * 50, 0, 100) * 0.10
+    pullback_p    = _clamp(50 + h1_pullback_signed * 50, 0, 100) * 0.08
+    freshness_p   = _clamp(50 + _safe_float(snap.factors.get('trend_freshness', 0.0) if isinstance(snap.factors, dict) else 0.0, 0.0) * 30, 0, 100) * 0.03
 
     score = (trend_p+mom_p+lowvol_p+vol_p+fund_p+liq_p+macd_p+bb_p+eff_p+rsia_p+
-             sr_p+oi_p+decay_p+accel_p+early_p+turn_p+whale_p+nvt_p+cross_p)
+             sr_p+oi_p+decay_p+accel_p+early_p+turn_p+whale_p+nvt_p+cross_p+
+             fresh_start_p+pullback_p+freshness_p)
 
     if snap.atr_pct>max_atr: score -= min(28,(snap.atr_pct-max_atr)*3.2)
     if snap.rsi_1h>78: score -= 5
     elif snap.rsi_1h<22: score -= 5
     if snap.momentum_decay < -2.0: score -= 4
 
-    # v4.1: 方向判断——金叉/死叉信号可直接确定方向（趋势刚开始）
+    # v6.1: 7D 动量过老惩罚 — 即使其他指标好看，也不应建仓在趋势末端
+    starter_type_pre = str(getattr(snap, 'h1_starter_signal_type', 'none'))
+    starter_conf_pre = _safe_float(getattr(snap, 'h1_starter_confidence', 0.0), 0.0)
+    has_starter_signal = (starter_type_pre in ('fresh_start','pullback_reentry') and starter_conf_pre >= 0.45)
+    age_thr = float(config.get('mom_1d_extreme_threshold_pct', 12.0))
+    age_pen = float(config.get('mom_1d_extreme_penalty', 10.0))
+    if abs(snap.momentum_1d) > age_thr and not has_starter_signal:
+        # 超过阈值且没有 H1 启动信号 → 视为老趋势，重罚
+        excess = (abs(snap.momentum_1d) - age_thr) / max(age_thr, 1.0)
+        score -= min(age_pen + 8.0, age_pen * (0.6 + 0.5 * excess))
+
+    # v6.0 强化方向判断：H1 启动信号 > EMA 交叉 > 早启动触发 > direction_bias+动量
+    starter_type = str(getattr(snap, 'h1_starter_signal_type', 'none'))
+    starter_dir = str(getattr(snap, 'h1_starter_direction', 'NONE'))
+    starter_conf = _safe_float(getattr(snap, 'h1_starter_confidence', 0.0), 0.0)
     if snap.atr_pct > max_atr:
         direction = 'WAIT'; edge = 0
-    elif ema_cross >= 0.7:   # 最近1~2根内金叉，优先确定多头方向
+    elif starter_type in ('fresh_start', 'pullback_reentry') and starter_dir in {'BUY', 'SELL'} and starter_conf >= 0.5:
+        if starter_dir == 'SELL' and not bool(config.get('allow_short', True)):
+            direction = 'WAIT'; edge = 0
+        else:
+            direction = starter_dir; edge = score / 100
+    elif ema_cross >= 0.7:
         direction = 'BUY'; edge = score / 100
     elif ema_cross <= -0.7 and bool(config.get('allow_short', True)):
         direction = 'SELL'; edge = score / 100
@@ -903,12 +1536,24 @@ def _single_asset_score(snap, config):
     time_adj = _timeliness_score_adjustment(snap, config, direction)
     score = _clamp(score + time_adj, 0.0, 100.0)
 
+    # v6.0: H1 启动 / 回调企稳 显著加分（绿色通道，配置可调）
+    if direction in {'BUY', 'SELL'}:
+        if starter_type == 'fresh_start' and starter_dir == direction and starter_conf >= 0.55:
+            bonus = 6.0 + 6.0 * starter_conf  # 最高+12分
+            score = _clamp(score + bonus, 0.0, 100.0)
+        elif starter_type == 'pullback_reentry' and starter_dir == direction and starter_conf >= 0.55:
+            bonus = 4.0 + 6.0 * starter_conf  # 最高+10分
+            score = _clamp(score + bonus, 0.0, 100.0)
+
     fs = {'trend':trend_p,'momentum':mom_p,'low_vol':lowvol_p,'volume':vol_p,
           'funding':fund_p,'liquidity':liq_p,'macd':macd_p,'bb':bb_p,
           'efficiency':eff_p,'rsi_align':rsia_p,'short_reversal':sr_p,'oi_heat':oi_p,
           'decay':decay_p,'accel':accel_p,
           'early_trend':early_p,'turn':turn_p,'whale':whale_p,'nvt':nvt_p,
-          'ema_cross':cross_p}
+          'ema_cross':cross_p,
+          # v6.0
+          'h1_fresh_start':fresh_start_p,'h1_pullback_reentry':pullback_p,
+          'trend_freshness':freshness_p}
     return round(_clamp(score,0,100),2), direction, edge, fs
 
 
@@ -918,21 +1563,25 @@ def _single_asset_score(snap, config):
 
 def _factor_weights():
     return {
-        # v4.1: 动量因子整体降权（避免趋势运行越久分越高）
-        'momentum_1h':0.05,'momentum_4h':0.10,'momentum_1d':0.08,
-        'short_reversal':0.02,'trend_quality':0.12,'low_volatility':0.06,
-        'liquidity':0.06,'volume_impulse':0.06,'funding_carry':0.02,
+        # v6.0: 动量因子进一步降权，把权重让给"启动信号"和"回调企稳"
+        'momentum_1h':0.04,'momentum_4h':0.08,'momentum_1d':0.06,
+        'short_reversal':0.02,'trend_quality':0.09,'low_volatility':0.05,
+        'liquidity':0.05,'volume_impulse':0.05,'funding_carry':0.02,
         'funding_contrarian':0.02,'oi_heat':0.02,
-        'macd_momentum':0.04,'bb_percentb':0.02,'vol_zscore':0.02,
+        'macd_momentum':0.03,'bb_percentb':0.02,'vol_zscore':0.02,
         'close_strength':0.02,'efficiency_ratio':0.02,'rsi_alignment':0.01,
         # v3
-        'momentum_decay':0.05,'momentum_acceleration':0.03,
-        # v4.1: 早期趋势因子大幅提权（捕捉趋势初始启动）
-        'early_trend_trigger':0.12,'ema_compression_breakout':0.05,
-        'rsi_midline_turn':0.04,'macd_hist_turn':0.04,
-        'donchian_breakout':0.04,'volume_price_confirm':0.03,
-        'ema_cross_signal':0.06,  # v4.1: 1H EMA金叉/死叉
-        'whale_flow':0.03,'exchange_netflow':0.02,'active_addresses':0.02,'nvt_signal':0.02,
+        'momentum_decay':0.04,'momentum_acceleration':0.03,
+        # v4.1: 早期趋势因子保权
+        'early_trend_trigger':0.09,'ema_compression_breakout':0.04,
+        'rsi_midline_turn':0.03,'macd_hist_turn':0.03,
+        'donchian_breakout':0.03,'volume_price_confirm':0.02,
+        'ema_cross_signal':0.05,
+        # v6.0 启动+回调精准捕捉（核心新增因子，方向化已编码）
+        'h1_fresh_start':0.10,        # 趋势刚启动权重最高
+        'h1_pullback_reentry':0.08,   # 回调企稳次之
+        'trend_freshness':0.04,       # 趋势新鲜度（老趋势负贡献）
+        'whale_flow':0.02,'exchange_netflow':0.02,'active_addresses':0.02,'nvt_signal':0.02,
     }
 
 def _resolve_factor_weights(symbols, config):
@@ -1087,6 +1736,13 @@ def _build_scan_result(snapshot,score,direction,edge,factor_scores,passed,rank,u
             '3分钟回调结论':str(snapshot.m3_pullback_reason or '-'),
             '3分钟时效(根)':str(snapshot.m3_staleness_bars),  # v3fix
             '1H趋势延续根数':f"{snapshot.h1_trend_age}根({'⚠过老' if snapshot.h1_trend_age > int(_safe_float(config.get('max_h1_trend_age',12),12)) else '✓'})",  # v3.1
+            'H1启动信号':(
+                f"[{getattr(snapshot,'h1_starter_signal_type','none')}] "
+                f"方向={getattr(snapshot,'h1_starter_direction','NONE')} "
+                f"置信={getattr(snapshot,'h1_starter_confidence',0.0):.2f} | "
+                f"{getattr(snapshot,'h1_starter_detail','')}"
+            ) if str(getattr(snapshot,'h1_starter_signal_type','none')) != 'none' else '无',
+            'H1_ATR%':f"{getattr(snapshot,'h1_atr_pct',0.0):.2f}",
             '鲸鱼流入':f"{snapshot.whale_flow:+.4f}",
             '交易所净流':f"{snapshot.exchange_netflow:+.4f}",
             '活跃地址':f"{snapshot.active_addresses:.2f}",
@@ -1157,6 +1813,13 @@ def _cs1__edge_to_score(edge, snap):
     if snap.efficiency_ratio>=0.3: score+=1.5
     if snap.macd_momentum>0.5: score+=1
     if snap.momentum_decay>0.5: score+=1
+    # v6.0: H1 启动 / 回调企稳 加分（截面排序也享受绿色通道）
+    starter_type = str(getattr(snap, 'h1_starter_signal_type', 'none'))
+    starter_conf = _safe_float(getattr(snap, 'h1_starter_confidence', 0.0), 0.0)
+    if starter_type == 'fresh_start' and starter_conf >= 0.55:
+        score += 4.0 + 4.0 * starter_conf  # 最高+8分
+    elif starter_type == 'pullback_reentry' and starter_conf >= 0.55:
+        score += 3.0 + 3.0 * starter_conf  # 最高+6分
     score -= min(18, max(snap.atr_pct-7.5,0)*2.4)
     return round(_clamp(score,0,100),2)
 
@@ -1310,21 +1973,29 @@ _ai2_CONFIG_SCHEMA = {
     "h1_trend_age_hard_limit":      {"type": "int",   "default": 20,          "label": "1H趋势硬过滤上限（超过直接排除，0=不限）"},
     "require_early_trend_entry":    {"type": "bool",  "default": False,       "label": "只接受趋势早期信号（trend_age<=max_h1_trend_age）"},
     "early_trend_edge_discount":    {"type": "float", "default": 0.06,        "label": "早期趋势降低min_abs_edge的折扣量"},
+    # v6.0 启动+回调精准捕捉
+    "h1_starter_signal_enabled":    {"type": "bool",  "default": True,        "label": "启用H1启动信号绿色通道"},
+    "h1_starter_min_confidence":    {"type": "float", "default": 0.45,        "label": "启动信号最低置信度"},
+    "h1_starter_skip_m3_filter":    {"type": "bool",  "default": True,        "label": "启动信号同向时豁免3m硬过滤"},
 }
 
 _ai2__DEFAULT_CONFIG = {k: v["default"] for k, v in _ai2_CONFIG_SCHEMA.items()}
 
 _BASE_WEIGHTS = {
-    # v4.1: 降低动量权重（避免老趋势得高分），提升早期特征权重
-    "momentum": 0.09, "trend": 0.12, "reversal": 0.07, "low_vol": 0.08,
-    "liquidity": 0.08, "volume_impulse": 0.06, "funding_contra": 0.05,
-    "oi_confirmation": 0.05, "on_chain_accumulation": 0.09,
-    "network_value": 0.06, "llm_sentiment": 0.07, "event_momentum": 0.03,
-    "developer_activity": 0.02, "early_trend_trigger": 0.13,
-    "ema_compression_breakout": 0.04, "rsi_midline_turn": 0.035,
-    "macd_hist_turn": 0.035, "donchian_breakout": 0.035,
-    "volume_price_confirm": 0.03,
-    "ema_cross_signal": 0.06,  # v4.1: 1H EMA金叉/死叉信号
+    # v6.0: 动量进一步降权，把权重让给启动信号；trend 也降权（老趋势分高问题）
+    "momentum": 0.07, "trend": 0.09, "reversal": 0.06, "low_vol": 0.07,
+    "liquidity": 0.07, "volume_impulse": 0.05, "funding_contra": 0.04,
+    "oi_confirmation": 0.04, "on_chain_accumulation": 0.07,
+    "network_value": 0.05, "llm_sentiment": 0.06, "event_momentum": 0.025,
+    "developer_activity": 0.015, "early_trend_trigger": 0.10,
+    "ema_compression_breakout": 0.035, "rsi_midline_turn": 0.03,
+    "macd_hist_turn": 0.03, "donchian_breakout": 0.03,
+    "volume_price_confirm": 0.025,
+    "ema_cross_signal": 0.05,
+    # v6.0 启动+回调精准捕捉
+    "h1_fresh_start": 0.10,        # 趋势刚启动权重最高
+    "h1_pullback_reentry": 0.08,   # 回调企稳次之
+    "trend_freshness": 0.03,
 }
 
 _INTERACTION_TRANSFERS = {
@@ -1461,12 +2132,25 @@ def _ai2__build_snapshot(symbol, config) -> Dict[str, Any]:
     realized_vol = _ai2__realized_vol_pct(h1["c"], 24)
     trend = _ai2__trend_quality(h1, h4, d1)
 
-    # v3: 1H 趋势时效
-    h1_trend_age = _measure_trend_age(h1["c"], fast=12, slow=34, direction=trend)
+    # v6.0: H1 ATR% + v2 趋势年龄
+    h1_atr_pct = _atr_pct_quick(h1, 14)
+    h1_trend_age = _measure_trend_age_v2(h1["c"], fast=12, slow=34,
+                                          atr_pct=h1_atr_pct,
+                                          direction=float(trend) if abs(float(trend)) > 1e-6 else 0.0)
+    # v6.0: H1 启动信号（multi-engine 共用）
+    starter = _h1_starter_signal(h1, direction_hint=('BUY' if trend > 0.1 else ('SELL' if trend < -0.1 else '')))
 
     # 3m 企稳（含时效性）
     micro_confirm = _micro_pullback_continuation(m3, trend, config)
-    if bool(config.get("require_m3_pullback_confirmation", True)) and not micro_confirm["confirmed"]:
+    # v6.0: H1 启动信号自身方向明确且置信高 → 豁免 3m 阻断
+    _starter_high_conf_ai2 = (
+        str(starter.get('signal_type', 'none')) in ('fresh_start', 'pullback_reentry')
+        and str(starter.get('direction', 'NONE')) in {'BUY', 'SELL'}
+        and float(starter.get('confidence', 0.0)) >= float(config.get('h1_starter_min_confidence', 0.55))
+    )
+    _skip_m3_ai2 = bool(config.get('h1_starter_skip_m3_filter', True)) and _starter_high_conf_ai2
+    if (bool(config.get("require_m3_pullback_confirmation", True)) and not micro_confirm["confirmed"]
+        and not _skip_m3_ai2):
         return {"valid": False, "symbol": inst_id,
                 "reason": f"3分钟回调续势未确认: {micro_confirm['reason']}"}
 
@@ -1500,6 +2184,22 @@ def _ai2__build_snapshot(symbol, config) -> Dict[str, Any]:
         return {"valid": False, "symbol": inst_id,
                 "reason": f"1H趋势已运行{h1_trend_age}根，超过早期入场上限{max_age_cfg}根"}
 
+    # v6.0: 把启动信号映射成"方向化"因子
+    starter_dir = starter.get('direction', 'NONE')
+    starter_conf = float(starter.get('confidence', 0.0))
+    starter_sign = 1.0 if starter_dir == 'BUY' else (-1.0 if starter_dir == 'SELL' else 0.0)
+    fresh_start_factor = starter_conf * starter_sign if starter.get('signal_type') == 'fresh_start' else 0.0
+    pullback_reentry_factor = starter_conf * starter_sign if starter.get('signal_type') == 'pullback_reentry' else 0.0
+    max_age_cfg2 = float(config.get('max_h1_trend_age', 12) or 12)
+    if h1_trend_age <= max_age_cfg2 * 0.5:
+        trend_freshness = 1.0
+    elif h1_trend_age <= max_age_cfg2:
+        trend_freshness = 0.5
+    elif h1_trend_age <= max_age_cfg2 * 1.5:
+        trend_freshness = -0.3
+    else:
+        trend_freshness = -0.8
+
     factors = {
         "momentum": _clamp(momentum / 9.0, -2.0, 2.0),
         "trend": trend,
@@ -1522,6 +2222,10 @@ def _ai2__build_snapshot(symbol, config) -> Dict[str, Any]:
         "volume_price_confirm": early["volume_price_confirm"],
         "ema_cross_signal": early.get("ema_cross_signal", 0.0),  # v4.1
         "m3_pullback_score": micro_confirm["score"],
+        # v6.0 启动+回调精准捕捉
+        "h1_fresh_start": fresh_start_factor,
+        "h1_pullback_reentry": pullback_reentry_factor,
+        "trend_freshness": trend_freshness,
     }
     if bool(config.get("enable_mfin_interactions", True)):
         factors["ai_trend_interaction"] = _clamp(factors["trend"] * max(factors["llm_sentiment"], 0.0), -1.5, 1.5)
@@ -1543,6 +2247,12 @@ def _ai2__build_snapshot(symbol, config) -> Dict[str, Any]:
         "m3_pullback_pct": micro_confirm["pullback_pct"],
         "m3_impulse_pct": micro_confirm["impulse_pct"],
         "m3_staleness_bars": micro_confirm.get("staleness_bars", 0),
+        # v6.0 启动+回调
+        "h1_atr_pct": h1_atr_pct,
+        "h1_starter_signal_type": str(starter.get('signal_type', 'none')),
+        "h1_starter_confidence": float(starter.get('confidence', 0.0)),
+        "h1_starter_direction": str(starter.get('direction', 'NONE')),
+        "h1_starter_detail": str(starter.get('detail', '')),
         "early_trend": early, "factors": factors, "extra": extra,
     }
 
@@ -1599,6 +2309,8 @@ def _single_asset_scoring_factors(snap, weights):
         "ema_compression_breakout":0.80,"rsi_midline_turn":0.85,"macd_hist_turn":0.85,
         "donchian_breakout":0.80,"volume_price_confirm":0.80,"fresh_breakout_confirmation":0.70,
         "ema_cross_signal":0.80,
+        # v6.0: 启动信号已经是 [-1,1] 区间，scale=1 即不缩放
+        "h1_fresh_start":0.55,"h1_pullback_reentry":0.55,"trend_freshness":0.85,
     }
     raw = snap.get("factors", {}); scoring = {}
     for name in weights:
@@ -1622,9 +2334,14 @@ def _build_result_from_edge(snap, edge, weights, config, universe_size, scoring_
 
     allow_short = bool(config.get("allow_short", True))
 
-    # v4.1: 极新鲜的 EMA 金叉/死叉信号可强制确定方向
+    # v6.0: H1 启动信号优先确定方向（最强信号）
+    starter_type = str(snap.get("h1_starter_signal_type", "none"))
+    starter_dir = str(snap.get("h1_starter_direction", "NONE"))
+    starter_conf = float(snap.get("h1_starter_confidence", 0.0))
     ema_cross = float(snap["factors"].get("ema_cross_signal", 0.0) or 0.0)
-    if ema_cross >= 0.7:
+    if starter_type in ("fresh_start", "pullback_reentry") and starter_conf >= 0.5 and starter_dir in {"BUY", "SELL"}:
+        direction = starter_dir
+    elif ema_cross >= 0.7:
         direction = "BUY"
     elif ema_cross <= -0.7 and allow_short:
         direction = "SELL"
@@ -1636,16 +2353,46 @@ def _build_result_from_edge(snap, edge, weights, config, universe_size, scoring_
     time_adj = _timeliness_edge_adjustment(snap, config, direction)
     adjusted_edge += time_adj
 
+    # v6.0: 启动信号给 edge 直接加分，并降低 min_score 门槛
+    starter_aligned = (starter_dir == direction) and starter_conf >= 0.55
+    starter_bonus_edge = 0.0
+    if starter_aligned:
+        if starter_type == "fresh_start":
+            starter_bonus_edge = 0.18 * starter_conf  # 高达 +0.18
+        elif starter_type == "pullback_reentry":
+            starter_bonus_edge = 0.14 * starter_conf
+    if direction in {"BUY", "SELL"}:
+        adjusted_edge += np.sign(adjusted_edge or (1.0 if direction == "BUY" else -1.0)) * starter_bonus_edge
+
     score = _ai2__edge_to_score(abs(adjusted_edge), snap)
 
-    # v4.1: 早期趋势降低 min_abs_edge 门槛
+    # v6.0: 启动信号场景下，分数追加 6-10 分
+    if starter_aligned:
+        if starter_type == "fresh_start":
+            score = _clamp(score + 4.0 + 6.0 * starter_conf, 0.0, 100.0)
+        elif starter_type == "pullback_reentry":
+            score = _clamp(score + 3.0 + 5.0 * starter_conf, 0.0, 100.0)
+
+    # v6.1: 7D 动量过老惩罚（无启动信号时）
+    mom_1d_pct = float(snap.get("price_change_24h", 0.0))  # 占位；AI2 没有 momentum_1d 字段，用 24h 近似
+    # AI2 内部已有 factors["momentum"] (混合动量)，这里直接用 ranking 的 trend / momentum
+    mom_factor = float(snap["factors"].get("momentum", 0.0))
+    if abs(mom_factor) > 1.6 and not starter_aligned:
+        # momentum factor 已 clamp 到 [-2, 2]，>1.6 说明动量已"过载"
+        score = _clamp(score - 8.0 - 4.0 * (abs(mom_factor) - 1.6), 0.0, 100.0)
+
+    # v4.1: 早期趋势降低 min_abs_edge 门槛（v6.0: 启动信号也算 early）
     age = snap.get("h1_trend_age", 0)
     max_age = int(_cfg_float(config, "max_h1_trend_age", 12.0))
-    is_early = age <= max_age or abs(ema_cross) >= 0.5
+    is_early = (age <= max_age) or (abs(ema_cross) >= 0.5) or starter_aligned
     discount = _cfg_float(config, "early_trend_edge_discount", 0.06) if is_early else 0.0
+    # v6.0: 启动信号还可降低 min_score 2 分（绿色通道）
+    eff_min_score = _cfg_float(config, "min_score", 72.0)
+    if starter_aligned:
+        eff_min_score = max(eff_min_score - 2.0, 60.0)
     passed = (
         direction in {"BUY", "SELL"}
-        and score >= _cfg_float(config, "min_score", 72.0)
+        and score >= eff_min_score
         and abs(adjusted_edge) >= _cfg_float(config, "min_abs_edge", 0.24) - discount
     )
 
@@ -1725,6 +2472,12 @@ def _build_result_from_edge(snap, edge, weights, config, universe_size, scoring_
             "3分钟回调时效": f"{stale}根前({'超时' if stale > max_stale else '新鲜'})",
             "1H趋势延续根数": f"{age}根({'过老' if age > max_age else '正常'})",
             "时效状态": freshness_label,
+            "H1启动信号": (
+                f"[{starter_type}] 方向={starter_dir} 置信={starter_conf:.2f} | "
+                f"{snap.get('h1_starter_detail','')}"
+            ) if starter_type != "none" else "无",
+            "H1_ATR%": f"{float(snap.get('h1_atr_pct', 0.0)):.2f}",
+            "启动绿色通道": "✓" if starter_aligned else "—",
         },
     }
     if build_opportunity_profile:
@@ -2076,6 +2829,10 @@ _drl3_CONFIG_SCHEMA = {
     # v4.0 新增
     "enable_bidask_spread_filter":  {"type": "bool",  "default": True,  "label": "启用买卖价差过滤"},
     "max_bidask_spread_pct":        {"type": "float", "default": 0.25,  "label": "最大允许买卖价差%"},
+    # v6.0 启动+回调精准捕捉
+    "h1_starter_signal_enabled":    {"type": "bool",  "default": True,  "label": "启用H1启动信号绿色通道"},
+    "h1_starter_min_confidence":    {"type": "float", "default": 0.45,  "label": "启动信号最低置信度"},
+    "h1_starter_skip_m3_filter":    {"type": "bool",  "default": True,  "label": "启动信号同向时豁免3m硬过滤"},
 }
 
 _drl3__DEFAULT_CONFIG = {k: v["default"] for k, v in _drl3_CONFIG_SCHEMA.items()}
@@ -2190,8 +2947,15 @@ def _drl3__build_snapshot(symbol, config) -> Dict[str, Any]:
     trend_d1 = _ema_trend_score(d1["c"], 5, 13) if len(d1) > 16 else trend_h4 * 0.6
     trend_alignment = _clamp(trend_h1 * 0.45 + trend_h4 * 0.35 + trend_d1 * 0.20, -2.0, 2.0)
 
-    # ── v2: 1H 趋势时效性 ──
-    h1_trend_age = _measure_trend_age(h1["c"], fast=12, slow=34, direction=trend_alignment)
+    # ── v6.0: 用 v2 趋势年龄 + H1 ATR% + 启动信号 ──
+    h1_atr_pct_drl = _atr_pct_quick(h1, 14)
+    h1_trend_age = _measure_trend_age_v2(h1["c"], fast=12, slow=34,
+                                          atr_pct=h1_atr_pct_drl,
+                                          direction=float(trend_alignment))
+    starter_drl = _h1_starter_signal(
+        h1,
+        direction_hint=('BUY' if trend_alignment > 0.15 else ('SELL' if trend_alignment < -0.15 else ''))
+    )
 
     # ── v2.1: 资金费率结算时段回避 ──
     funding_risk = _check_funding_timing(config) if _cfg_float(config, "enable_funding_timing_guard", 1.0) > 0 else False
@@ -2216,7 +2980,15 @@ def _drl3__build_snapshot(symbol, config) -> Dict[str, Any]:
                 return {"valid": False, "symbol": inst_id, "reason": "买卖价差过大，流动性不足"}
 
     micro_confirm = _micro_pullback_continuation(m3, trend_alignment, config)
-    if bool(config.get("require_m3_pullback_confirmation", True)) and not micro_confirm["confirmed"]:
+    # v6.0: H1 启动信号自身方向明确且置信高 → 豁免 3m 阻断
+    _starter_high_conf_drl = (
+        str(starter_drl.get('signal_type', 'none')) in ('fresh_start', 'pullback_reentry')
+        and str(starter_drl.get('direction', 'NONE')) in {'BUY', 'SELL'}
+        and float(starter_drl.get('confidence', 0.0)) >= float(config.get('h1_starter_min_confidence', 0.55))
+    )
+    _skip_m3_drl = bool(config.get('h1_starter_skip_m3_filter', True)) and _starter_high_conf_drl
+    if (bool(config.get("require_m3_pullback_confirmation", True)) and not micro_confirm["confirmed"]
+        and not _skip_m3_drl):
         return {"valid": False, "symbol": inst_id,
                 "reason": f"3分钟回调续势未确认: {micro_confirm['reason']}"}
 
@@ -2249,6 +3021,13 @@ def _drl3__build_snapshot(symbol, config) -> Dict[str, Any]:
         _safe_float(extra.get("news_sentiment"), np.nan),
     ], [0.35, 0.30, 0.25, 0.10])
 
+    # v6.0: H1 启动方向化因子
+    starter_dir_drl = starter_drl.get('direction', 'NONE')
+    starter_conf_drl = float(starter_drl.get('confidence', 0.0))
+    starter_sign_drl = 1.0 if starter_dir_drl == 'BUY' else (-1.0 if starter_dir_drl == 'SELL' else 0.0)
+    fresh_start_factor_drl = starter_conf_drl * starter_sign_drl if starter_drl.get('signal_type') == 'fresh_start' else 0.0
+    pullback_reentry_factor_drl = starter_conf_drl * starter_sign_drl if starter_drl.get('signal_type') == 'pullback_reentry' else 0.0
+
     factors = {
         "momentum_1h": _clamp(h1_mom / 180.0, -2.5, 2.5),
         "momentum_4h": _clamp(h4_mom / 280.0, -2.5, 2.5),
@@ -2269,6 +3048,9 @@ def _drl3__build_snapshot(symbol, config) -> Dict[str, Any]:
         # v2 新增因子
         "trend_freshness": _clamp(1.0 - h1_trend_age / max(_cfg_float(config, "max_h1_trend_age", 12.0), 1.0), -1.0, 1.0),
         "m3_timeliness": micro_confirm.get("timeliness_score", 0.0),
+        # v6.0 启动 / 回调企稳
+        "h1_fresh_start": fresh_start_factor_drl,
+        "h1_pullback_reentry": pullback_reentry_factor_drl,
     }
 
     meta_feedback = extra.get("strategy_feedback", {}) if isinstance(extra.get("strategy_feedback"), dict) else {}
@@ -2292,6 +3074,12 @@ def _drl3__build_snapshot(symbol, config) -> Dict[str, Any]:
         "breakout_bps": breakout_bps, "volume_impulse": volume_impulse,
         "funding_risk": funding_risk, "btc_correlation": btc_corr,
         "regime": regime, "meta_feedback": meta_feedback, "factors": factors,
+        # v6.0 启动+回调
+        "h1_atr_pct": float(h1_atr_pct_drl),
+        "h1_starter_signal_type": str(starter_drl.get('signal_type', 'none')),
+        "h1_starter_confidence": float(starter_drl.get('confidence', 0.0)),
+        "h1_starter_direction": str(starter_drl.get('direction', 'NONE')),
+        "h1_starter_detail": str(starter_drl.get('detail', '')),
     }
 
 
@@ -2324,6 +3112,9 @@ def _score_snapshot(snap: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, A
         + 0.06 * factors["llm_sentiment"]
         + 0.04 * factors["trend_freshness"]     # v2
         + 0.03 * factors["m3_timeliness"]       # v2
+        # v6.0: 启动信号是方向化的，多头时正贡献，空头时已是负值
+        + 0.18 * float(factors.get("h1_fresh_start", 0.0))
+        + 0.14 * float(factors.get("h1_pullback_reentry", 0.0))
         - 0.10 * max(factors["risk_vol"], 0.0),
         -3.0, 3.0,
     )
@@ -2335,6 +3126,9 @@ def _score_snapshot(snap: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, A
         + 0.10 * (-factors["oi_confirmation"])
         + 0.06 * (-factors["llm_sentiment"])
         + 0.04 * (-factors["trend_freshness"])  # v2: 空头时反向
+        # v6.0: 启动信号方向化 → 取反给 short
+        + 0.18 * (-float(factors.get("h1_fresh_start", 0.0)))
+        + 0.14 * (-float(factors.get("h1_pullback_reentry", 0.0)))
         + 0.05 * max(factors["risk_vol"], 0.0),
         -3.0, 3.0,
     )
@@ -2387,7 +3181,17 @@ def _score_snapshot(snap: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, A
     # v2: 时效性惩罚写入 score
     base_score = _drl3__edge_to_score(edge, confidence, startup_gate, snap)
     age_penalty = _age_penalty(snap, config, direction)
-    score = _clamp(base_score - age_penalty, 0.0, 100.0)
+    # v6.0: 启动信号同向 → 加分
+    starter_type_drl = str(snap.get("h1_starter_signal_type", "none"))
+    starter_dir_drl = str(snap.get("h1_starter_direction", "NONE"))
+    starter_conf_drl = float(snap.get("h1_starter_confidence", 0.0))
+    starter_bonus = 0.0
+    if starter_type_drl in ("fresh_start", "pullback_reentry") and starter_dir_drl == direction and starter_conf_drl >= 0.55:
+        if starter_type_drl == "fresh_start":
+            starter_bonus = 5.0 + 7.0 * starter_conf_drl  # 最高 +12 分
+        else:
+            starter_bonus = 4.0 + 6.0 * starter_conf_drl  # 最高 +10 分
+    score = _clamp(base_score - age_penalty + starter_bonus, 0.0, 100.0)
 
     passed = (
         direction in {"BUY", "SELL"}
@@ -2460,6 +3264,12 @@ def _score_snapshot(snap: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, A
             "3分钟回调时效": f"{stale}根前({'超时' if stale > max_stale else '新鲜'})",
             "1H趋势延续根数": f"{age}根({'过老' if age > max_age else '正常'})",
             "时效性惩罚": f"-{age_penalty:.1f}分",
+            "H1启动信号": (
+                f"[{starter_type_drl}] 方向={starter_dir_drl} 置信={starter_conf_drl:.2f} | "
+                f"{snap.get('h1_starter_detail','')}"
+            ) if starter_type_drl != "none" else "无",
+            "H1_ATR%": f"{float(snap.get('h1_atr_pct', 0.0)):.2f}",
+            "启动绿色通道": "✓" if starter_bonus > 0 else "—",
         },
     }
     if build_opportunity_profile:
@@ -2501,9 +3311,31 @@ def _age_penalty(snap: Dict[str, Any], config: Dict[str, Any], direction: str) -
 # ══════════════════════════════════════════════
 
 def _hourly_startup_gate(snap: Dict[str, Any], direction: str, config: Dict[str, Any]) -> bool:
-    h1_mom_min = _cfg_float(config, "hourly_start_momentum_bps", 45.0)
-    breakout_min = _cfg_float(config, "hourly_start_breakout_bps", 20.0)
+    """v6.0: 启动门槛改为 ATR 自适应 + H1 启动信号绿色通道。
+
+    旧版固定 45bps 动量门槛对低波动币种过严、对高波动币种过松。
+    新版以"H1 ATR% × 30"作为基准（ATR=1% → 30bps，ATR=3% → 90bps），跨币种公平。
+    若 H1 启动信号触发（fresh_start / pullback_reentry，同向，conf≥0.55）则直接放行。
+    """
+    h1_mom_min_cfg = _cfg_float(config, "hourly_start_momentum_bps", 45.0)
+    breakout_min_cfg = _cfg_float(config, "hourly_start_breakout_bps", 20.0)
     vol_min = _cfg_float(config, "hourly_start_volume_impulse", 1.18)
+    # ATR 自适应：以 ATR% × 30 作为动量阈值下限，但不低于配置的 50%
+    atr_pct_h1 = float(snap.get("h1_atr_pct", 0.0) or 0.0)
+    if atr_pct_h1 > 0.3:
+        atr_based_mom = atr_pct_h1 * 30.0  # ATR=1.5% → 45bps
+        atr_based_bo  = atr_pct_h1 * 13.0  # ATR=1.5% → 19.5bps
+        h1_mom_min = max(h1_mom_min_cfg * 0.5, min(h1_mom_min_cfg * 1.5, atr_based_mom))
+        breakout_min = max(breakout_min_cfg * 0.5, min(breakout_min_cfg * 1.5, atr_based_bo))
+    else:
+        h1_mom_min, breakout_min = h1_mom_min_cfg, breakout_min_cfg
+    # H1 启动绿色通道：信号同向且置信≥0.55 → 直接放行（解决"刚启动还没暴涨"被卡的问题）
+    starter_type = str(snap.get("h1_starter_signal_type", "none"))
+    starter_dir = str(snap.get("h1_starter_direction", "NONE"))
+    starter_conf = float(snap.get("h1_starter_confidence", 0.0))
+    if starter_type in ("fresh_start", "pullback_reentry") and starter_dir == direction and starter_conf >= 0.55:
+        # 启动信号需要量能至少不缩水（比 vol_min 略宽容）
+        return snap["volume_impulse"] >= max(1.0, vol_min * 0.85) and snap["adx_1h"] >= 14.0
     if direction == "BUY":
         return (
             snap["h1_mom_bps"] >= h1_mom_min
@@ -2735,6 +3567,7 @@ try:
 except Exception:
     xgb = None
     _HAS_XGB = False
+    logger.warning("[XGBoost策略] xgboost 不可用，将使用线性回退。安装: pip install xgboost")
 
 try:
     from src.scanner.base_scanner import BaseScannerStrategy, ScanCondition
@@ -2775,6 +3608,10 @@ _xgb4_CONFIG_SCHEMA = {
     "m3_stabilization_bars":  {"type":"int","default":4,          "label":"3分钟企稳确认根数"},
     "m3_min_impulse_pct":     {"type":"float","default":0.65,     "label":"3m最小原趋势脉冲%"},
     "max_h1_trend_age":       {"type":"int","default":12,         "label":"1H趋势最大延续根数"},
+    # v6.0 启动+回调精准捕捉
+    "h1_starter_signal_enabled": {"type":"bool", "default":True,  "label":"启用H1启动信号绿色通道"},
+    "h1_starter_min_confidence": {"type":"float","default":0.45,  "label":"启动信号最低置信度"},
+    "h1_starter_skip_m3_filter": {"type":"bool", "default":True,  "label":"启动信号同向时豁免3m硬过滤"},
 }
 
 _DEFAULT = {k: v["default"] for k, v in _xgb4_CONFIG_SCHEMA.items()}
@@ -2835,11 +3672,37 @@ class XGBoostCrossSectionalRanker(BaseScannerStrategy if _HAS_BASE else object):
             score -= min(20, (snap["atr_pct"] - float(self.config.get("max_atr_pct", 8.0))) * 2.5)
         score = _clamp(score, 0, 100)
 
-        direction = "BUY" if snap["momentum_4h"] > 0 else "SELL"
+        # v6.0: 方向判定优先级 — H1 启动信号 > EMA 排列+动量同向 > 单点动量
+        starter_type_xg = str(snap.get("h1_starter_signal_type", "none"))
+        starter_dir_xg = str(snap.get("h1_starter_direction", "NONE"))
+        starter_conf_xg = float(snap.get("h1_starter_confidence", 0.0))
+        ema_trend_dir = float(snap.get("ema_trend_dir", 0.0))
+        if starter_type_xg in ("fresh_start", "pullback_reentry") and starter_conf_xg >= 0.55 and starter_dir_xg in {"BUY", "SELL"}:
+            direction = starter_dir_xg
+        elif ema_trend_dir > 0 and snap["momentum_4h"] > 0:
+            direction = "BUY"
+        elif ema_trend_dir < 0 and snap["momentum_4h"] < 0:
+            direction = "SELL"
+        elif abs(snap["momentum_4h"]) >= 0.005:  # >=0.5%
+            direction = "BUY" if snap["momentum_4h"] > 0 else "SELL"
+        else:
+            direction = "WAIT"
         if not bool(self.config.get("allow_short", True)) and direction == "SELL":
             direction = "WAIT"
 
-        passed = score >= float(self.config.get("min_score", 72))
+        # v6.0: 启动信号同向加分（启动期最多+12，并降低 min_score 门槛）
+        starter_min_conf_xg = float(self.config.get("h1_starter_min_confidence", 0.45))
+        starter_aligned_xg = (direction in {"BUY", "SELL"} and starter_dir_xg == direction and starter_conf_xg >= starter_min_conf_xg)
+        if starter_aligned_xg:
+            if starter_type_xg == "fresh_start":
+                score = _clamp(score + 6 + 6 * starter_conf_xg, 0, 100)
+            elif starter_type_xg == "pullback_reentry":
+                score = _clamp(score + 4 + 6 * starter_conf_xg, 0, 100)
+
+        eff_min_xg = float(self.config.get("min_score", 72))
+        if starter_aligned_xg:
+            eff_min_xg = max(eff_min_xg - 4.0, 60.0)
+        passed = score >= eff_min_xg
         # 积累待标注样本
         self._record_pending_sample(snap)
         return _xgb4__result(snap, score, direction, f, passed, self.config)
@@ -2878,11 +3741,36 @@ class XGBoostCrossSectionalRanker(BaseScannerStrategy if _HAS_BASE else object):
                 score -= min(20, (snap["atr_pct"] - float(self.config.get("max_atr_pct", 8.0))) * 2.5)
             score = _clamp(score, 0, 100)
 
-            direction = "BUY" if snap["momentum_4h"] > 0 else "SELL"
+            # v6.0: 方向判定 — H1 启动信号优先 + EMA/动量双确认
+            starter_type_b = str(snap.get("h1_starter_signal_type", "none"))
+            starter_dir_b = str(snap.get("h1_starter_direction", "NONE"))
+            starter_conf_b = float(snap.get("h1_starter_confidence", 0.0))
+            ema_trend_b = float(snap.get("ema_trend_dir", 0.0))
+            if starter_type_b in ("fresh_start", "pullback_reentry") and starter_conf_b >= 0.55 and starter_dir_b in {"BUY", "SELL"}:
+                direction = starter_dir_b
+            elif ema_trend_b > 0 and snap["momentum_4h"] > 0:
+                direction = "BUY"
+            elif ema_trend_b < 0 and snap["momentum_4h"] < 0:
+                direction = "SELL"
+            elif abs(snap["momentum_4h"]) >= 0.005:
+                direction = "BUY" if snap["momentum_4h"] > 0 else "SELL"
+            else:
+                direction = "WAIT"
             if not bool(self.config.get("allow_short", True)) and direction == "SELL":
                 direction = "WAIT"
+            # 启动信号同向加分（启动期最多+12 并降 min_score 4分）
+            starter_min_conf_b = float(self.config.get("h1_starter_min_confidence", 0.45))
+            starter_aligned_b = (direction in {"BUY", "SELL"} and starter_dir_b == direction and starter_conf_b >= starter_min_conf_b)
+            if starter_aligned_b:
+                if starter_type_b == "fresh_start":
+                    score = _clamp(score + 6 + 6 * starter_conf_b, 0, 100)
+                elif starter_type_b == "pullback_reentry":
+                    score = _clamp(score + 4 + 6 * starter_conf_b, 0, 100)
 
-            passed = score >= float(self.config.get("min_score", 72))
+            eff_min_b = float(self.config.get("min_score", 72))
+            if starter_aligned_b:
+                eff_min_b = max(eff_min_b - 4.0, 60.0)
+            passed = score >= eff_min_b
             if passed:
                 results.append(_xgb4__result(snap, score, direction, z.loc[sym_name].to_dict(), passed, self.config))
 
@@ -3113,15 +4001,35 @@ def _xgb4__build_snapshot(symbol, config) -> Dict[str, Any]:
     m4h = _pct(close_4h, 12)
     m1d = _pct(d1["c"].astype(float), 7) if len(d1) >= 14 else _pct(close_1h, 168)
 
-    # 趋势时效检查
-    trend_hint = 1.0 if m4h > 0 else (-1.0 if m4h < 0 else 0.0)
-    h1_trend_age = _measure_trend_age(close_1h, 12, 34, trend_hint)
+    # v6.0: 趋势方向用 EMA 排列+动量综合判定，并采用 ATR 自适应趋势年龄
+    h1_atr_pct_xg = _atr_pct_quick(h1, 14)
+    ema12_h1 = close_1h.ewm(span=12, adjust=False).mean().iloc[-1]
+    ema34_h1 = close_1h.ewm(span=34, adjust=False).mean().iloc[-1]
+    ema_trend_dir = 1.0 if ema12_h1 > ema34_h1 else (-1.0 if ema12_h1 < ema34_h1 else 0.0)
+    mom_dir = 1.0 if m4h > 0 else (-1.0 if m4h < 0 else 0.0)
+    # 方向同向取该方向；方向冲突时优先 EMA（更稳定）
+    if ema_trend_dir == mom_dir:
+        trend_hint = ema_trend_dir
+    elif ema_trend_dir != 0:
+        trend_hint = ema_trend_dir
+    else:
+        trend_hint = mom_dir
+    h1_trend_age = _measure_trend_age_v2(close_1h, fast=12, slow=34,
+                                          atr_pct=h1_atr_pct_xg, direction=trend_hint)
     max_age = int(config.get("max_h1_trend_age", 12) or 12)
     if h1_trend_age > max_age * 2:
         return {"valid": False, "symbol": inst, "reason": f"1H趋势过老({h1_trend_age}根)"}
+    # v6.0: H1 启动信号
+    starter_xg = _h1_starter_signal(h1, direction_hint=('BUY' if trend_hint > 0 else ('SELL' if trend_hint < 0 else '')))
 
-    # 3m 回调企稳检查
-    if bool(config.get("require_m3_pullback", True)) and len(m3) >= 36:
+    # 3m 回调企稳检查（v6.0: H1 启动信号自身高置信时豁免）
+    _starter_high_conf_xg = (
+        str(starter_xg.get('signal_type', 'none')) in ('fresh_start', 'pullback_reentry')
+        and str(starter_xg.get('direction', 'NONE')) in {'BUY', 'SELL'}
+        and float(starter_xg.get('confidence', 0.0)) >= float(config.get('h1_starter_min_confidence', 0.55))
+    )
+    _skip_m3_xg = bool(config.get('h1_starter_skip_m3_filter', True)) and _starter_high_conf_xg
+    if bool(config.get("require_m3_pullback", True)) and len(m3) >= 36 and not _skip_m3_xg:
         micro = _micro_pullback_check(m3, trend_hint, config)
         if not micro["confirmed"]:
             return {"valid": False, "symbol": inst, "reason": f"3m回调未确认: {micro['reason']}"}
@@ -3144,6 +4052,13 @@ def _xgb4__build_snapshot(symbol, config) -> Dict[str, Any]:
     maccel = _mom_accel(close_1h, 6)
     early = _early_trigger(h1) if len(h1) >= 58 else 0.0  # v2: rsi_c 允许负值
 
+    # v6.0: 启动信号方向化因子
+    starter_dir_xg = starter_xg.get('direction', 'NONE')
+    starter_conf_xg = float(starter_xg.get('confidence', 0.0))
+    starter_sign_xg = 1.0 if starter_dir_xg == 'BUY' else (-1.0 if starter_dir_xg == 'SELL' else 0.0)
+    fresh_xg = starter_conf_xg * starter_sign_xg if starter_xg.get('signal_type') == 'fresh_start' else 0.0
+    pullback_xg = starter_conf_xg * starter_sign_xg if starter_xg.get('signal_type') == 'pullback_reentry' else 0.0
+
     factors = {
         # 动量值保留小数形式（截面 z-score 归一化后量纲无关）
         "momentum_1h": m1h * 100,    # 百分比形式
@@ -3165,6 +4080,9 @@ def _xgb4__build_snapshot(symbol, config) -> Dict[str, Any]:
         "momentum_decay": mdecay,
         "momentum_acceleration": maccel,
         "early_trend_trigger": early,
+        # v6.0
+        "h1_fresh_start": fresh_xg,
+        "h1_pullback_reentry": pullback_xg,
     }
 
     return {
@@ -3172,6 +4090,14 @@ def _xgb4__build_snapshot(symbol, config) -> Dict[str, Any]:
         "last_price": lp, "volume_24h": v24, "price_change_24h": chg24,
         "momentum_1d": m1d, "momentum_4h": m4h, "momentum_1h": m1h,
         "atr_pct": atr, "factors": factors,
+        # v6.0
+        "h1_atr_pct": h1_atr_pct_xg,
+        "h1_starter_signal_type": str(starter_xg.get('signal_type', 'none')),
+        "h1_starter_confidence": starter_conf_xg,
+        "h1_starter_direction": starter_dir_xg,
+        "h1_starter_detail": str(starter_xg.get('detail', '')),
+        "h1_trend_age_v2": int(h1_trend_age),
+        "ema_trend_dir": float(ema_trend_dir),
     }
 
 
@@ -3376,6 +4302,10 @@ def _xgb4__result(snap, score, direction, fs, passed, config):
         "freshness": _clamp(50 + snap["momentum_1h"] * 30, 0, 100),
         "risk": _clamp(85 - snap["atr_pct"] * 6, 10, 95),
     }
+    starter_type_x = str(snap.get("h1_starter_signal_type", "none"))
+    starter_dir_x = str(snap.get("h1_starter_direction", "NONE"))
+    starter_conf_x = float(snap.get("h1_starter_confidence", 0.0))
+    h1_age_v2_x = int(snap.get("h1_trend_age_v2", 0))
     result = {
         "symbol": inst, "passed": passed,
         "score": round(float(score), 2),
@@ -3391,6 +4321,12 @@ def _xgb4__result(snap, score, direction, fs, passed, config):
         "details": {
             "机会类型": f"XGBoost截面{'多头' if direction=='BUY' else '空头' if direction=='SELL' else '观察'}",
             "评估": " | ".join(sigs),
+            "1H趋势延续根数": f"{h1_age_v2_x}根",
+            "H1启动信号": (
+                f"[{starter_type_x}] 方向={starter_dir_x} 置信={starter_conf_x:.2f} | "
+                f"{snap.get('h1_starter_detail','')}"
+            ) if starter_type_x != "none" else "无",
+            "H1_ATR%": f"{float(snap.get('h1_atr_pct', 0.0)):.2f}",
         },
     }
     if build_opportunity_profile:
@@ -3454,6 +4390,10 @@ _of5_CONFIG_SCHEMA = {
     "enable_micro_vwap":      {"type":"bool","default":True,      "label":"启用VWAP微结构"},
     "enable_volume_delta":    {"type":"bool","default":True,      "label":"启用买卖力量"},
     "enable_atr_squeeze":     {"type":"bool","default":True,      "label":"启用ATR收缩"},
+    # v6.0 启动+回调精准捕捉
+    "h1_starter_signal_enabled": {"type":"bool", "default":True,  "label":"启用H1启动信号绿色通道"},
+    "h1_starter_min_confidence": {"type":"float","default":0.45,  "label":"启动信号最低置信度"},
+    "h1_starter_skip_m3_filter": {"type":"bool", "default":True,  "label":"启动信号同向时豁免3m硬过滤"},
 }
 
 _DEFAULT = {k: v["default"] for k, v in _of5_CONFIG_SCHEMA.items()}
@@ -3483,7 +4423,17 @@ class AIOrderflowMomentumBreakoutScanner(BaseScannerStrategy if _HAS_BASE else o
         snap = _of5__build_snapshot(symbol, self.config)
         if not snap["valid"]: return _of5__failed(symbol, snap["reason"])
         score, direction, factors = _score(snap, self.config)
-        passed = score >= float(self.config.get("min_score", 72))
+        # v6.0: 启动信号同向时降低 min_score 4分
+        starter_type = str(snap.get("h1_starter_signal_type", "none"))
+        starter_dir = str(snap.get("h1_starter_direction", "NONE"))
+        starter_conf = float(snap.get("h1_starter_confidence", 0.0))
+        starter_min_conf = float(self.config.get("h1_starter_min_confidence", 0.45))
+        starter_aligned = (direction in {"BUY", "SELL"} and starter_dir == direction
+                           and starter_type in ("fresh_start", "pullback_reentry") and starter_conf >= starter_min_conf)
+        eff_min = float(self.config.get("min_score", 72))
+        if starter_aligned:
+            eff_min = max(eff_min - 4.0, 60.0)
+        passed = score >= eff_min
         return _of5__result(snap, score, direction, factors, passed, self.config)
 
     def scan_all_symbols(self, symbols):
@@ -3544,15 +4494,34 @@ def _of5__build_snapshot(symbol, config) -> Dict[str, Any]:
     m4h = _pct(close_4h, 12)
     m1d = _pct(d1["c"].astype(float), 7) if len(d1)>=14 else _pct(close_1h, 168)
 
-    # 趋势时效检查
-    trend_hint = 1.0 if m4h > 0 else (-1.0 if m4h < 0 else 0.0)
-    h1_trend_age = _measure_trend_age(close_1h, 12, 34, trend_hint)
+    # v6.0: H1 ATR% + EMA 排列 + 改进趋势年龄
+    h1_atr_pct_of = _atr_pct_quick(h1, 14)
+    ema12_h1_of = close_1h.ewm(span=12, adjust=False).mean().iloc[-1]
+    ema34_h1_of = close_1h.ewm(span=34, adjust=False).mean().iloc[-1]
+    ema_trend_of = 1.0 if ema12_h1_of > ema34_h1_of else (-1.0 if ema12_h1_of < ema34_h1_of else 0.0)
+    mom_dir_of = 1.0 if m4h > 0 else (-1.0 if m4h < 0 else 0.0)
+    if ema_trend_of == mom_dir_of:
+        trend_hint = ema_trend_of
+    elif ema_trend_of != 0:
+        trend_hint = ema_trend_of
+    else:
+        trend_hint = mom_dir_of
+    h1_trend_age = _measure_trend_age_v2(close_1h, fast=12, slow=34,
+                                          atr_pct=h1_atr_pct_of, direction=trend_hint)
     max_age = int(config.get("max_h1_trend_age", 12) or 12)
     if h1_trend_age > max_age * 2:
         return {"valid":False,"symbol":inst,"reason":f"1H趋势过老({h1_trend_age}根>{max_age*2}上限)"}
+    # 启动信号
+    starter_of = _h1_starter_signal(h1, direction_hint=('BUY' if trend_hint > 0 else ('SELL' if trend_hint < 0 else '')))
 
-    # 3m 回调企稳
-    if bool(config.get("require_m3_pullback", True)) and len(m3) >= 36:
+    # 3m 回调企稳（v6.0: H1 启动信号自身高置信时豁免）
+    _starter_high_conf_of = (
+        str(starter_of.get('signal_type', 'none')) in ('fresh_start', 'pullback_reentry')
+        and str(starter_of.get('direction', 'NONE')) in {'BUY', 'SELL'}
+        and float(starter_of.get('confidence', 0.0)) >= float(config.get('h1_starter_min_confidence', 0.55))
+    )
+    _skip_m3_of = bool(config.get('h1_starter_skip_m3_filter', True)) and _starter_high_conf_of
+    if bool(config.get("require_m3_pullback", True)) and len(m3) >= 36 and not _skip_m3_of:
         micro = _micro_pullback_continuation(m3, trend_hint, config)
         if not micro["confirmed"]:
             return {"valid":False,"symbol":inst,"reason":f"3m回调未确认: {micro['reason']}"}
@@ -3676,6 +4645,14 @@ def _of5__build_snapshot(symbol, config) -> Dict[str, Any]:
         "btc_coint_pvalue": btc_coint_pvalue, "btc_hedge_ratio": btc_hedge_ratio,
         "atr_pct": _of5__atr_pct(h4, 14), "factors": factors,
         "is_long": m4h > 0,
+        # v6.0
+        "h1_atr_pct": float(h1_atr_pct_of),
+        "h1_trend_age_v2": int(h1_trend_age),
+        "ema_trend_dir": float(ema_trend_of),
+        "h1_starter_signal_type": str(starter_of.get('signal_type', 'none')),
+        "h1_starter_confidence": float(starter_of.get('confidence', 0.0)),
+        "h1_starter_direction": str(starter_of.get('direction', 'NONE')),
+        "h1_starter_detail": str(starter_of.get('detail', '')),
     }
 
 
@@ -3685,8 +4662,25 @@ def _of5__build_snapshot(symbol, config) -> Dict[str, Any]:
 
 def _score(snap, config):
     f = snap["factors"]
-    is_long = snap["momentum_4h"] > 0
-    direction = "BUY" if is_long else "SELL"
+    # v6.0: 方向判定 — 启动信号 > EMA+动量同向 > 仅 mom_4h
+    starter_type_o = str(snap.get("h1_starter_signal_type", "none"))
+    starter_dir_o = str(snap.get("h1_starter_direction", "NONE"))
+    starter_conf_o = float(snap.get("h1_starter_confidence", 0.0))
+    ema_trend_o = float(snap.get("ema_trend_dir", 0.0))
+    if starter_type_o in ("fresh_start", "pullback_reentry") and starter_conf_o >= 0.55 and starter_dir_o in {"BUY", "SELL"}:
+        direction = starter_dir_o
+        is_long = (direction == "BUY")
+    elif ema_trend_o > 0 and snap["momentum_4h"] > 0:
+        direction = "BUY"; is_long = True
+    elif ema_trend_o < 0 and snap["momentum_4h"] < 0:
+        direction = "SELL"; is_long = False
+    elif abs(snap["momentum_4h"]) >= 0.005:
+        is_long = snap["momentum_4h"] > 0
+        direction = "BUY" if is_long else "SELL"
+    else:
+        # 弱趋势时也保留方向用于后续分数计算（取最近偏向），但配置层可能改为 WAIT
+        is_long = snap["momentum_4h"] > 0
+        direction = "BUY" if is_long else "SELL"
 
     # v2 修复 #2: 多空对称评分
     # 多头: 因子值越高越好（因子已映射到[0,100]，50为中性）
@@ -3745,6 +4739,13 @@ def _score(snap, config):
     if snap["atr_pct"] > max_atr:
         score -= min(20, (snap["atr_pct"] - max_atr) * 2.5)
 
+    # v6.0: 启动信号同向加分
+    if direction in {"BUY", "SELL"} and starter_dir_o == direction and starter_conf_o >= 0.55:
+        if starter_type_o == "fresh_start":
+            score = _clamp(score + 4 + 6 * starter_conf_o, 0, 100)
+        elif starter_type_o == "pullback_reentry":
+            score = _clamp(score + 3 + 5 * starter_conf_o, 0, 100)
+
     # 方向覆盖
     if not bool(config.get("allow_short", True)) and direction == "SELL":
         direction = "WAIT"
@@ -3765,10 +4766,7 @@ def _to_df(rows):
         if rename: df = df.rename(columns=rename)
     else:
         clean = [r[:6] for r in (rows or []) if isinstance(r,(list,tuple)) and len(r)>=6]
-        if not clean:
-            df = pd.DataFrame(np.empty((0, 6)))
-            df.columns = ["ts","o","h","l","c","vol"]
-            return df
+        if not clean: return pd.DataFrame(columns=["ts","o","h","l","c","vol"])
         df = pd.DataFrame(clean, columns=["ts","o","h","l","c","vol"])
     for c in ["ts","o","h","l","c","vol"]:
         if c in df.columns: df[c] = pd.to_numeric(df[c], errors="coerce")
@@ -3885,6 +4883,10 @@ def _of5__result(snap, score, direction, factors, passed, config):
     active_factors = {k: round(float(v), 2) for k, v in factors.items()
                       if not (k == "btc_spread_z" and not bool(config.get("enable_btc_spread", True)))}
 
+    starter_type_d = str(snap.get("h1_starter_signal_type", "none"))
+    starter_dir_d = str(snap.get("h1_starter_direction", "NONE"))
+    starter_conf_d = float(snap.get("h1_starter_confidence", 0.0))
+    h1_age_v2_d = int(snap.get("h1_trend_age_v2", 0))
     result = {
         "symbol": inst, "passed": passed,
         "score": round(float(score), 2),
@@ -3902,6 +4904,12 @@ def _of5__result(snap, score, direction, factors, passed, config):
             "订单流不平衡": f"{snap['orderflow']:+.3f}",
             "BTC价差Z": f"{snap['btc_spread_z']:+.2f}",
             "ATR%": f"{snap['atr_pct']:.2f}",
+            "1H趋势延续根数": f"{h1_age_v2_d}根",
+            "H1启动信号": (
+                f"[{starter_type_d}] 方向={starter_dir_d} 置信={starter_conf_d:.2f} | "
+                f"{snap.get('h1_starter_detail','')}"
+            ) if starter_type_d != "none" else "无",
+            "H1_ATR%": f"{float(snap.get('h1_atr_pct', 0.0)):.2f}",
             "评估": " | ".join(sigs),
         },
     }
@@ -3935,12 +4943,12 @@ class _of5__MinimalSymbol:
 
 CONFIG_SCHEMA = {
     # ── 基础 ──
-    "min_volume_24h":               {"type": "float", "default": 5_000_000.0, "label": "组合最小24H成交额（v2.1: 8M→5M，更多币种纳入）"},
-    "min_score":                    {"type": "float", "default": 68.0,        "label": "子策略最低扫描分数（共识信号用此门槛）"},
-    "backtest_min_score":           {"type": "float", "default": 68.0,        "label": "回测最低入场分数"},
-    "single_engine_min_score":      {"type": "float", "default": 78.0,        "label": "单引擎信号更高门槛（非共振信号需超此分才保留）"},
-    "top_n":                        {"type": "int",   "default": 9,           "label": "组合最多输出（收紧为9条）"},
-    "top_n_per_strategy":           {"type": "int",   "default": 6,           "label": "每个子策略最多输出"},
+    "min_volume_24h":               {"type": "float", "default": 10_000_000.0,"label": "组合最小24H成交额（v6.1: 5M→10M 提高品种质量）"},
+    "min_score":                    {"type": "float", "default": 73.0,        "label": "子策略最低扫描分数（v6.1: 68→73 收紧共识门槛）"},
+    "backtest_min_score":           {"type": "float", "default": 70.0,        "label": "回测最低入场分数"},
+    "single_engine_min_score":      {"type": "float", "default": 78.0,        "label": "单引擎信号更高门槛（v6.1: 74→78 收紧；启动信号同向时减免4分）"},
+    "top_n":                        {"type": "int",   "default": 6,           "label": "组合最多输出（v6.1: 9→6 提高质量）"},
+    "top_n_per_strategy":           {"type": "int",   "default": 4,           "label": "每个子策略最多输出（v6.1: 6→4）"},
     "include_individual_results":   {"type": "bool",  "default": True,        "label": "保留子策略单独结果"},
     "include_consensus_results":    {"type": "bool",  "default": True,        "label": "输出多策略共振结果"},
     "dedupe_by_symbol":             {"type": "bool",  "default": True,        "label": "按交易对去重仅保留最高分"},
@@ -4064,7 +5072,7 @@ CONFIG_SCHEMA = {
 
     # ── v6.0 P1-3 z-score 排名门槛 ────────────────────────────────────
     "use_zscore_ranking":           {"type": "bool",  "default": True,        "label": "v6.0 启用z-score候选池排名(替代绝对分数门槛)"},
-    "min_zscore_threshold":         {"type": "float", "default": 0.5,         "label": "最低z-score(0.5≈前30%, 1.04≈前15%)"},
+    "min_zscore_threshold":         {"type": "float", "default": 0.85,        "label": "最低z-score(v6.1: 0.5→0.85≈前20%)"},
 
     # ── v6.0 P2-1 突破放量百分位 ──────────────────────────────────────
     "h1_breakout_vol_use_percentile": {"type": "bool","default": True,        "label": "v6.0 突破放量改用历史分位(替代固定倍数)"},
@@ -4077,6 +5085,14 @@ CONFIG_SCHEMA = {
     # ── v6.0 P2-5 BTC 熔断机制 ────────────────────────────────────────
     "btc_circuit_breaker_enabled":  {"type": "bool",  "default": True,        "label": "v6.0 启用BTC剧烈波动熔断"},
     "btc_circuit_threshold_pct":    {"type": "float", "default": 5.0,         "label": "BTC 1H |涨跌|超此值时全面熔断"},
+
+    # ── v6.0 启动+回调精准捕捉绿色通道 ──────────────────────────────────
+    "h1_starter_signal_enabled":    {"type": "bool",  "default": True,        "label": "启用 H1 启动+回调企稳信号绿色通道"},
+    "h1_starter_min_confidence":    {"type": "float", "default": 0.45,        "label": "启动信号最低置信度（>= 此值开启绿色通道）"},
+    "h1_starter_score_relax":       {"type": "float", "default": 3.0,         "label": "启动信号同向时 single_engine_min_score 减免（v6.1: 4→3）"},
+    "h1_starter_zscore_relax":      {"type": "float", "default": 0.25,        "label": "启动信号同向时 z-score 阈值减免（v6.1: 0.4→0.25）"},
+    "h1_starter_skip_m3_filter":    {"type": "bool",  "default": True,        "label": "启动信号同向时跳过 m3 硬性过滤（减少错杀）"},
+    "h1_starter_min_volume_24h_floor": {"type": "float", "default": 3_000_000.0, "label": "启动信号绿色通道最低24H成交额下限"},
 }
 
 _DEFAULT_CONFIG = {key: spec["default"] for key, spec in CONFIG_SCHEMA.items()}
@@ -4287,6 +5303,19 @@ class AICrossSectionDualFactorComboScanner(BaseScannerStrategy if _HAS_SCANNER_B
         output = _dedupe_results(output, dedupe_by_symbol=bool(self.config.get("dedupe_by_symbol", True)))
         output.sort(key=_result_sort_key, reverse=True)
         top_n = int(self.config.get("top_n", 12) or 12)
+
+        # ── P1-3: z-score 排名门槛（候选池前 N% 而非绝对分数）──────────
+        # 解决评分膨胀（基础 60+加分 18 = 78，与真正 86 难区分）
+        # zscore >= 0.5 ≈ 前 30%，zscore >= 1.04 ≈ 前 15%
+        if bool(self.config.get("use_zscore_ranking", True)) and len(output) >= 5:
+            scores = [float(r.get("score", 0) or 0) for r in output]
+            mean_s = float(np.mean(scores))
+            std_s = max(float(np.std(scores)), 1e-6)
+            min_z = float(self.config.get("min_zscore_threshold", 0.5))
+            for r in output:
+                z = (float(r.get("score", 0) or 0) - mean_s) / std_s
+                r["_zscore"] = round(z, 3)
+                r.setdefault("details", {})["z-score"] = f"{z:+.2f} (μ={mean_s:.1f} σ={std_s:.2f})"
         # ── 3m/1H 质量检查 ──────────────────────────────────────────
         # 共识结果（多引擎共振）：跳过硬过滤，仅做软降权
         # 个体结果：执行硬过滤（不通过则淘汰）
@@ -4296,9 +5325,26 @@ class AICrossSectionDualFactorComboScanner(BaseScannerStrategy if _HAS_SCANNER_B
         single_min = float(self.config.get("single_engine_min_score", 78.0) or 78.0)
         filtered = []
         relax_for_h1 = bool(self.config.get("h1_breakout_relax_3m", True))
+        # P1-3: z-score 排名过滤（与绝对分数门槛并行检查）
+        zscore_on = bool(self.config.get("use_zscore_ranking", True)) and len(output) >= 5
+        z_threshold = float(self.config.get("min_zscore_threshold", 0.5))
+        starter_relax_score = float(self.config.get("h1_starter_score_relax", 4.0))
+        starter_relax_z = float(self.config.get("h1_starter_zscore_relax", 0.4))
+        starter_skip_m3 = bool(self.config.get("h1_starter_skip_m3_filter", True))
         for item in output:
             sym_id = str(item.get("symbol", ""))
             sym_obj = sym_lookup.get(sym_id)
+            # v6.0: 检测 H1 启动绿色通道（一次性计算，下面多处复用）
+            has_starter = self._item_has_starter_signal(item)
+            if has_starter:
+                item.setdefault("details", {})["启动绿色通道"] = "✓ 享受门槛减免"
+            # P1-3: z-score 排名预筛（共识结果免筛 + v6.0: 启动信号减免阈值）
+            if zscore_on and "共振" not in str(item.get("category", "")):
+                z = float(item.get("_zscore", 0))
+                eff_z = z_threshold - (starter_relax_z if has_starter else 0.0)
+                if z < eff_z:
+                    logger.debug(f"[z-score] 淘汰 {sym_id}: z={z:.2f}<{eff_z:.2f}（绿色通道={has_starter}）")
+                    continue
             if not sym_obj:
                 if item.get("passed"):
                     filtered.append(item)
@@ -4334,11 +5380,19 @@ class AICrossSectionDualFactorComboScanner(BaseScannerStrategy if _HAS_SCANNER_B
             elif hard_filter and not soft_only:
                 # 单引擎信号额外分数门槛：需超过 single_engine_min_score
                 item_score = float(item.get("score", 0) or 0)
-                if item_score < global_min:
-                    logger.info(f"[分数门槛] 淘汰 {sym_id}: 评分{item_score:.1f} < {global_min:.0f}")
+                eff_global = global_min - (starter_relax_score if has_starter else 0.0)
+                eff_single = single_min - (starter_relax_score if has_starter else 0.0)
+                if item_score < eff_global:
+                    logger.info(f"[分数门槛] 淘汰 {sym_id}: 评分{item_score:.1f} < {eff_global:.0f}（绿={has_starter}）")
                     continue
-                if item_score < single_min:
-                    logger.info(f"[单引擎门槛] 淘汰 {sym_id}: 单引擎评分{item_score:.1f} < {single_min:.0f}")
+                if item_score < eff_single:
+                    logger.info(f"[单引擎门槛] 淘汰 {sym_id}: 单引擎评分{item_score:.1f} < {eff_single:.0f}（绿={has_starter}）")
+                    continue
+                # v6.0: 启动信号同向时跳过 m3 硬过滤（这恰好是"刚启动还没形成3m回调"的场景）
+                if has_starter and starter_skip_m3:
+                    item.setdefault("details", {})["3m硬性过滤"] = "已跳过(H1启动绿色通道)"
+                    if item.get("passed"):
+                        filtered.append(item)
                     continue
                 filtered_item = self._apply_m3_hard_filter(item, sym_obj)
                 if filtered_item.get("passed"):
@@ -4348,11 +5402,13 @@ class AICrossSectionDualFactorComboScanner(BaseScannerStrategy if _HAS_SCANNER_B
             else:
                 # 软模式或不启用硬过滤：应用分数门槛后保留
                 item_score = float(item.get("score", 0) or 0)
-                if item_score < global_min:
-                    logger.info(f"[分数门槛] 淘汰 {sym_id}: 评分{item_score:.1f} < {global_min:.0f}")
+                eff_global = global_min - (starter_relax_score if has_starter else 0.0)
+                eff_single = single_min - (starter_relax_score if has_starter else 0.0)
+                if item_score < eff_global:
+                    logger.info(f"[分数门槛] 淘汰 {sym_id}: 评分{item_score:.1f} < {eff_global:.0f}（绿={has_starter}）")
                     continue
-                if not is_consensus and item_score < single_min:
-                    logger.info(f"[单引擎门槛] 淘汰 {sym_id}: 单引擎评分{item_score:.1f} < {single_min:.0f}")
+                if not is_consensus and item_score < eff_single:
+                    logger.info(f"[单引擎门槛] 淘汰 {sym_id}: 单引擎评分{item_score:.1f} < {eff_single:.0f}（绿={has_starter}）")
                     continue
                 if item.get("passed"):
                     filtered.append(item)
@@ -4371,7 +5427,7 @@ class AICrossSectionDualFactorComboScanner(BaseScannerStrategy if _HAS_SCANNER_B
               f"共识 {len(consensus_results)} 条 → 过滤后 {len(final)} 条 (扫描 {len(scan_symbols)} 个品种)")
         print(f"[AI五引擎诊断] 品种={len(scan_symbols)} 子策略产出={child_total}({child_breakdown}) "
               f"共识={len(consensus_results)} 去重前={pre_filter_count} 3m/1H过滤后={len(filtered)} 最终={len(final)}")
-        return {
+        result_payload = {
             "type": "ai_cross_section_triple_engine_combo",
             "all_opportunities": final,
             "child_counts": {n: len(v) for n, v in by_strategy.items()},
@@ -4382,7 +5438,12 @@ class AICrossSectionDualFactorComboScanner(BaseScannerStrategy if _HAS_SCANNER_B
             "input_symbols": len(symbols),
             "parallel_child_engines": bool(self.config.get("parallel_child_engines", False)),
             "child_timing_sec": timing if bool(self.config.get("profile_child_timing", True)) else {},
+            "failed_engines": dict(getattr(self, "_failed_engines", {})),   # P1-5: 暴露失败子策略
+            "mode": str(self.config.get("mode", "normal")),                 # P1-4: 模式
         }
+        # P1-2 + P3-4: 扫描结束清空 H1 指标缓存（避免下一次扫描使用旧数据）
+        self._symbol_indicator_cache.clear()
+        return result_payload
 
     # ── 回测信号 ─────────────────────────────────────────────────────────────
     def generate_signal(self, data, *args, **kwargs):
@@ -4512,14 +5573,20 @@ class AICrossSectionDualFactorComboScanner(BaseScannerStrategy if _HAS_SCANNER_B
 
     # ── 内部方法 ─────────────────────────────────────────────────────────────
     def _apply_runtime_modes(self) -> None:
+        # P1-4 修复：统一 mode 字段，废弃 ultra_strict_mode bool（仍兼容旧配置文件）
         mode = str(self.config.get("mode", "normal")).strip().lower()
-        ultra = bool(self.config.get("ultra_strict_mode", False)) or mode in {"1","ultra","ultra_strict","strict","超严"}
-        if not ultra:
-            self.config["ultra_strict_mode"] = False
-            self.config["mode"] = "normal"
+        # 兼容：ultra_strict_mode=True 等价于 mode="ultra"
+        if bool(self.config.get("ultra_strict_mode", False)) or mode in {"1","ultra","ultra_strict","strict","超严"}:
+            mode = "ultra"
+        # 规范化
+        if mode not in {"normal", "ultra"}:
+            mode = "normal"
+        self.config["mode"] = mode
+        # 同步旧字段（向后兼容）
+        self.config["ultra_strict_mode"] = (mode == "ultra")
+        if mode == "normal":
             return
-        self.config["ultra_strict_mode"] = True
-        self.config["mode"] = "ultra"
+        # ultra 模式参数收紧
         tn = max(6, min(9, int(self.config.get("ultra_target_top_n", 9) or 9)))
         self.config["min_score"] = max(float(self.config.get("min_score", 83.0) or 83.0), 86.0)
         self.config["backtest_min_score"] = max(float(self.config.get("backtest_min_score", 75.0) or 75.0), 78.0)
@@ -4529,6 +5596,14 @@ class AICrossSectionDualFactorComboScanner(BaseScannerStrategy if _HAS_SCANNER_B
         self.config["direction_conflict_penalty"] = max(float(self.config.get("direction_conflict_penalty", 8.0) or 8.0), 9.0)
         self.config["include_consensus_results"] = True
         self.config["dedupe_by_symbol"] = True
+        # P1-3: ultra 模式 z-score 提升到 1.04（前 15%）
+        if bool(self.config.get("use_zscore_ranking", True)):
+            self.config["min_zscore_threshold"] = max(
+                float(self.config.get("min_zscore_threshold", 0.5)), 1.04)
+        # P1-1: ultra 模式至少 3 个不同风格组同向
+        if bool(self.config.get("style_grouped_consensus", True)):
+            self.config["min_style_groups_consensus"] = max(
+                int(self.config.get("min_style_groups_consensus", 2)), 3)
 
     def _select_scan_universe(self, symbols: List) -> List:
         if not bool(self.config.get("fast_scan_mode", False)):
@@ -4956,6 +6031,52 @@ class AICrossSectionDualFactorComboScanner(BaseScannerStrategy if _HAS_SCANNER_B
     # v4.2 交易员视角 — 风险/市场环境过滤器
     # ═══════════════════════════════════════════════════════════════════════════
 
+    # ── v6.0 启动信号辅助 ────────────────────────────────────────────────────
+    def _item_has_starter_signal(self, item: Dict[str, Any]) -> bool:
+        """判断 item（个体或共识）携带的子策略结果中是否有 H1 启动/回调企稳信号。
+
+        共识 item 的 child_results 会包含子策略原始结果；个体 item 直接看 details。
+        启用判定：信号同向且置信 ≥ h1_starter_min_confidence。
+        """
+        if not bool(self.config.get("h1_starter_signal_enabled", True)):
+            return False
+        min_conf = float(self.config.get("h1_starter_min_confidence", 0.55))
+        target_dir = str(item.get("direction", "WAIT")).upper()
+        if target_dir not in {"BUY", "SELL", "LONG", "SHORT"}:
+            return False
+        norm_dir = "BUY" if target_dir in {"BUY", "LONG"} else "SELL"
+
+        def _check_one(d: Dict) -> bool:
+            if not isinstance(d, dict):
+                return False
+            sig_label = str(d.get("H1启动信号", "") or "")
+            if not sig_label or sig_label == "无":
+                return False
+            # 文本格式: "[fresh_start] 方向=BUY 置信=0.72 | ..."
+            try:
+                if "方向=" in sig_label:
+                    dir_part = sig_label.split("方向=")[1].split()[0].strip()
+                    if dir_part not in {norm_dir, target_dir}:
+                        return False
+                if "置信=" in sig_label:
+                    conf_part = sig_label.split("置信=")[1].split()[0].strip()
+                    conf_val = float(conf_part)
+                    if conf_val < min_conf:
+                        return False
+                return ("fresh_start" in sig_label) or ("pullback_reentry" in sig_label)
+            except Exception:
+                return False
+
+        # 个体结果
+        if _check_one(item.get("details") if isinstance(item.get("details"), dict) else {}):
+            return True
+        # 共识结果（child_results）
+        for cr in (item.get("child_results") or []):
+            if isinstance(cr, dict) and _check_one(cr.get("details", {})):
+                if str(cr.get("direction", "")).upper() == norm_dir:
+                    return True
+        return False
+
     # ── 1. BTC 相关性过滤 ────────────────────────────────────────────────────
     def _get_btc_context(self, symbols: List) -> Dict[str, float]:
         """从扫描品种列表中提取 BTC 基准数据"""
@@ -5253,15 +6374,51 @@ class AICrossSectionDualFactorComboScanner(BaseScannerStrategy if _HAS_SCANNER_B
         if prev_high <= 0:
             return False, 0.0, "无有效历史高点"
 
-        # ① 突破检测
-        breakthrough = cur_close > prev_high * 1.001 and cur_high > prev_high
+        # v6.0: ATR 自适应突破门槛（原 0.1% 固定门槛对低波动币种过宽，对高波动币种过严）
+        # 计算 H1 ATR%
+        try:
+            tr_vals = []
+            for j in range(-min(15, len(rows)-1), 0):
+                h_, l_, pc_ = rv(rows[j], 2), rv(rows[j], 3), rv(rows[j-1], 4)
+                if pc_ > 0:
+                    tr_vals.append(max(h_-l_, abs(h_-pc_), abs(l_-pc_)))
+            atr_h1 = float(np.mean(tr_vals)) if tr_vals else 0.0
+            atr_pct_bo = atr_h1 / max(cur_close, 1e-9) * 100.0 if cur_close > 0 else 1.5
+        except Exception:
+            atr_pct_bo = 1.5
+        # 突破阈值：max(0.1%, 0.15×ATR)
+        bo_thr_pct = max(0.10, atr_pct_bo * 0.15)
+
+        # ① 突破检测（用 ATR 归一化阈值）
+        bo_pct = (cur_close - prev_high) / max(prev_high, 1e-9) * 100.0
+        breakthrough = bo_pct > bo_thr_pct and cur_high > prev_high
         if not breakthrough:
-            return False, 0.0, f"收盘{cur_close:.6g}未突破{lookback}根高点{prev_high:.6g}"
+            return False, 0.0, f"收盘{cur_close:.6g}未突破{lookback}根高点{prev_high:.6g} (需+{bo_thr_pct:.2f}%, 实际{bo_pct:+.2f}%)"
+
+        # v6.0: 假突破检测 — 突破后又回踩到突破点 -0.5×ATR 以下，confidence 减半
+        false_breakout_penalty = 1.0
+        if cur_low < prev_high * (1.0 - atr_pct_bo * 0.005):  # 0.5×ATR%
+            false_breakout_penalty = 0.5
 
         # ② 放量检测
-        prev_vols = [rv(r, 5) for r in prev_rows[-8:] if rv(r, 5) > 0]
-        avg_vol = sum(prev_vols) / len(prev_vols) if prev_vols else cur_vol
-        vol_surge = cur_vol >= avg_vol * vol_ratio
+        # P2-1: 改用历史百分位（默认前 25%）替代固定倍数，适应不同币种的常态分布
+        use_percentile = bool(self.config.get("h1_breakout_vol_use_percentile", True))
+        if use_percentile and len(rows) >= 50:
+            vols_hist = [rv(r, 5) for r in rows[-50:] if rv(r, 5) > 0]
+            if len(vols_hist) >= 20:
+                vol_pctile_thr = float(self.config.get("h1_breakout_vol_percentile", 0.75))
+                vol_thr_value = float(np.percentile(vols_hist, vol_pctile_thr * 100))
+                avg_vol = float(np.mean(vols_hist))
+                vol_surge = cur_vol >= vol_thr_value
+            else:
+                # 历史不足时退回旧逻辑
+                prev_vols = [rv(r, 5) for r in prev_rows[-8:] if rv(r, 5) > 0]
+                avg_vol = sum(prev_vols) / len(prev_vols) if prev_vols else cur_vol
+                vol_surge = cur_vol >= avg_vol * vol_ratio
+        else:
+            prev_vols = [rv(r, 5) for r in prev_rows[-8:] if rv(r, 5) > 0]
+            avg_vol = sum(prev_vols) / len(prev_vols) if prev_vols else cur_vol
+            vol_surge = cur_vol >= avg_vol * vol_ratio
 
         # ③ 强势收盘
         candle_range = cur_high - cur_low
@@ -5274,13 +6431,15 @@ class AICrossSectionDualFactorComboScanner(BaseScannerStrategy if _HAS_SCANNER_B
         # 综合判断
         checks = [breakthrough, vol_surge, strong_close]
         passed = sum(checks)
-        conf = passed / 3.0
+        conf = (passed / 3.0) * false_breakout_penalty
 
         details = (
             f"突破{lookback}根高点{prev_high:.6g}→{cur_close:.6g}(+{(cur_close/prev_high-1)*100:.2f}%)"
             f" | 量{cur_vol:.0f}vs均{avg_vol:.0f}({cur_vol/avg_vol:.1f}x)"
             f" | 收盘位{position:.0%}"
             f" | 评分{passed}/3"
+            f" | ATR={atr_pct_bo:.2f}% 阈={bo_thr_pct:.2f}%"
+            f"{' | ⚠假突破回探(-50%conf)' if false_breakout_penalty < 1.0 else ''}"
         )
         return True, conf, details
 
@@ -5577,40 +6736,54 @@ class AICrossSectionDualFactorComboScanner(BaseScannerStrategy if _HAS_SCANNER_B
                     return -8.0, f"EMA刚反向交叉({cross_dir})，与{direction}方向冲突-8分", "trend_extended"
 
             # ── 类型B：回调再启动（EMA方向正确 + 价格回踩EMA21后反弹）──
+            # v6.0 修复：
+            #   1. 回踩窗口从 8 根（8 小时）缩短为 5 根（5 小时），只看"刚刚回踩"
+            #   2. 距离阈值用 ATR 归一化，跨币种公平
+            #   3. 反弹幅度阈值 = max(0.3%, 0.4×ATR%)
             if bool(self.config.get("h1_pullback_reentry_enabled", True)):
                 reentry_bonus = float(self.config.get("h1_pullback_reentry_bonus", 10.0))
                 # 条件：趋势方向正确（EMA12>EMA34 for bull）
                 trend_aligned = (direction_up and cur_ema12 > cur_ema34) or (not direction_up and cur_ema12 < cur_ema34)
-                if trend_aligned and len(closes) >= 10:
-                    # 检测过去8根内是否有回踩到EMA21附近（1.5%以内）
+                # v6.0: 用 ATR 自适应触碰阈值（默认 1×ATR，最小 0.6%，最大 2.0%）
+                touch_thr_pct = max(0.6, min(2.0, atr_pct * 1.0))
+                # 反弹幅度阈值
+                rebound_thr_pct = max(0.3, atr_pct * 0.4)
+                if trend_aligned and len(closes) >= 6:
                     touched_ema21 = False
                     touch_bar = None
-                    for i in range(2, min(9, len(closes))):
+                    # v6.0: 缩短窗口到 1-5 根（最近 5 小时）
+                    for i in range(1, min(6, len(closes))):
                         ema21_val = float(ema21.iloc[-i])
                         if direction_up:
                             bar_low = lows[-i] if len(lows) >= i else closes[-i]
                             dist = abs(bar_low - ema21_val) / max(ema21_val, 1e-9) * 100
-                            if dist <= 1.5:
+                            if dist <= touch_thr_pct:
                                 touched_ema21 = True; touch_bar = i; break
                         else:
                             bar_high = highs[-i] if len(highs) >= i else closes[-i]
                             dist = abs(bar_high - ema21_val) / max(ema21_val, 1e-9) * 100
-                            if dist <= 1.5:
+                            if dist <= touch_thr_pct:
                                 touched_ema21 = True; touch_bar = i; break
 
                     if touched_ema21:
-                        # 价格当前已从EMA21反弹（回踩后恢复）
+                        # 价格当前已反弹（多头：close 高于触碰 bar 低点 + 阈值；空头镜像）
                         if direction_up:
-                            rebounded = cur_price > cur_ema21 * 1.003  # 已反弹回EMA21上方
+                            rebounded = (cur_price - cur_ema21) / max(cur_ema21, 1e-9) * 100 >= -touch_thr_pct * 0.3 \
+                                        and (cur_price > cur_ema21 * (1.0 + rebound_thr_pct / 100.0 * 0.5))
                         else:
-                            rebounded = cur_price < cur_ema21 * 0.997
+                            rebounded = (cur_ema21 - cur_price) / max(cur_ema21, 1e-9) * 100 >= -touch_thr_pct * 0.3 \
+                                        and (cur_price < cur_ema21 * (1.0 - rebound_thr_pct / 100.0 * 0.5))
                         if rebounded:
-                            bonus = reentry_bonus * (1.0 - (touch_bar - 2) * 0.1)
-                            bonus = max(reentry_bonus * 0.4, bonus)
-                            return bonus, f"H1回踩EMA21({touch_bar}根前)后再启动+{bonus:.1f}分 间距{ema_gap_pct:.1f}%", "pullback_reentry"
+                            # touch_bar=1 满分，touch_bar=5 衰减到 0.4
+                            bonus = reentry_bonus * max(0.4, 1.0 - (touch_bar - 1) * 0.15)
+                            return (bonus,
+                                    f"H1回踩EMA21({touch_bar}根前)后再启动+{bonus:.1f}分 "
+                                    f"触碰阈={touch_thr_pct:.2f}% ATR={atr_pct:.2f}% gap={ema_gap_pct:.1f}%",
+                                    "pullback_reentry")
 
             # ── 无特征但 EMA 间距适中 → 小奖励 ─────────────────────
-            if ema_gap_pct < gap_limit * 0.4:
+            # v6.0 修复：原代码用未定义的 gap_limit；改为已定义的 gap_limit_pct
+            if ema_gap_pct < gap_limit_pct * 0.4:
                 return 3.0, f"EMA间距适中({ema_gap_pct:.1f}%)，趋势较新+3分", "neutral"
             return 0.0, f"无明显早启动特征 间距{ema_gap_pct:.1f}%", "neutral"
 
@@ -5642,7 +6815,9 @@ class AICrossSectionDualFactorComboScanner(BaseScannerStrategy if _HAS_SCANNER_B
                     v = det.get(k) or (item.get(k) or 0)
                     if v: trend_age = int(float(str(v).split()[0])); break
                 except Exception: pass
-            if hard_limit > 0 and trend_age > hard_limit:
+            # v6.0: 带启动信号时豁免 trend_age 硬上限（避免老趋势横盘后刚启动被错杀）
+            has_starter_age = self._item_has_starter_signal(item)
+            if hard_limit > 0 and trend_age > hard_limit and not has_starter_age:
                 logger.info(f"[H1时机] 拒绝 {sym_id}: trend_age={trend_age}>{hard_limit}")
                 continue
 
@@ -5650,7 +6825,8 @@ class AICrossSectionDualFactorComboScanner(BaseScannerStrategy if _HAS_SCANNER_B
             if sym and direction in {"BUY", "SELL"}:
                 adj, timing_det, entry_type = self._h1_entry_timing_score(sym, direction)
                 gap_hard_thr = float(self.config.get("h1_ema_gap_penalty", 15.0)) * 0.8
-                if entry_type == "trend_extended" and adj <= -gap_hard_thr:
+                # v6.0: 带启动信号也豁免 trend_extended 硬拒
+                if entry_type == "trend_extended" and adj <= -gap_hard_thr and not has_starter_age:
                     logger.info(f"[H1时机] 拒绝 {sym_id}: {timing_det}")
                     continue
                 # P0-B4 修复：原代码 `dict(item)` 是浅拷贝，details 仍是同一对象
@@ -5665,14 +6841,166 @@ class AICrossSectionDualFactorComboScanner(BaseScannerStrategy if _HAS_SCANNER_B
 
     # ── v4.4: 共识层市场状态推断（统一用 _state_adjustment，不再用硬编码 STATE_WEIGHTS）──（保留原位置标记）
 
+    # ── P2-5: BTC 熔断检查 ──────────────────────────────────────────────────
+    def _btc_circuit_breaker(self, btc_ctx: Dict) -> Tuple[bool, str]:
+        """检查 BTC 是否处于剧烈波动状态。
+        返回 (是否熔断, 原因描述)。熔断时所有信号被丢弃。
+        """
+        if not bool(self.config.get("btc_circuit_breaker_enabled", True)):
+            return False, ""
+        threshold = float(self.config.get("btc_circuit_threshold_pct", 5.0))
+        btc_1h = abs(_safe_number(btc_ctx.get("btc_1h_move", 0)))
+        if btc_1h >= threshold:
+            return True, f"BTC 1H |{btc_1h:.2f}%| ≥ {threshold:.1f}%（熔断）"
+        return False, ""
+
+    # ── P2-2: H4 方向硬过滤 ──────────────────────────────────────────────────
+    def _apply_h4_direction_hard_filter(self, results: List[Dict], symbols: List) -> List[Dict]:
+        """H4 方向反向时直接淘汰（替代加分项）。
+        利用 P1-2 缓存的 H1/H4 EMA 数据。
+        """
+        if not bool(self.config.get("h4_direction_hard_filter", True)):
+            return results
+        min_conf = float(self.config.get("h4_filter_min_confidence", 0.4))
+        sym_map = {str(getattr(s, "inst_id", "")): s for s in symbols}
+        kept = []
+        for item in results:
+            # 共振信号免过滤（多引擎共识应该比 H4 信号更强）
+            if "共振" in str(item.get("category", "")):
+                kept.append(item); continue
+            # v6.0: H1 启动信号也免过滤（H4 反向 + H1 刚启动 = 反转点，不应一刀切）
+            if self._item_has_starter_signal(item):
+                kept.append(item); continue
+            sym_id = str(item.get("symbol", ""))
+            sym = sym_map.get(sym_id)
+            if not sym:
+                kept.append(item); continue
+            # 提取 H4 EMA
+            klines = (getattr(sym, "extra_data", {}) or {}).get("klines", {})
+            h4_rows = klines.get("4H") or klines.get("4h") or []
+            if len(h4_rows) < 26:
+                kept.append(item); continue   # 数据不足时不过滤
+            try:
+                h4_closes = [float(r[4]) for r in h4_rows if float(r[4]) > 0]
+                if len(h4_closes) < 26:
+                    kept.append(item); continue
+                s = pd.Series(h4_closes)
+                ema12 = float(s.ewm(span=12, adjust=False).mean().iloc[-1])
+                ema26 = float(s.ewm(span=26, adjust=False).mean().iloc[-1])
+                gap_pct = abs(ema12 - ema26) / max(ema26, 1e-9) * 100.0
+                # 仅当 EMA gap 显著（>= min_conf）时才硬拒（避免边缘情况误杀）
+                direction = str(item.get("direction", "WAIT")).upper()
+                h4_bull = ema12 > ema26
+                if gap_pct >= min_conf:
+                    if direction in {"BUY", "LONG"} and not h4_bull:
+                        logger.info(f"[H4硬过滤] 淘汰 {sym_id}: H4空头 EMA gap={gap_pct:.2f}%")
+                        continue
+                    if direction in {"SELL", "SHORT"} and h4_bull:
+                        logger.info(f"[H4硬过滤] 淘汰 {sym_id}: H4多头 EMA gap={gap_pct:.2f}%")
+                        continue
+            except Exception:
+                pass
+            kept.append(item)
+        return kept
+
+    # ── v6.1: 组合层老趋势硬过滤（基于子策略报告的 7D 动量） ───────────────────
+    def _apply_old_trend_filter(self, results: List[Dict]) -> List[Dict]:
+        """从 details/signals 文本中解析子策略的 7D 动量，超过硬上限直接淘汰。
+        启动信号同向 + conf≥0.55 时豁免。
+        """
+        kept = []
+        hard_pct = 25.0  # 7D 动量硬上限（绝对值）
+        for item in results:
+            # 共识结果跳过过滤（多引擎共振更可信）
+            if "共振" in str(item.get("category", "")):
+                kept.append(item); continue
+            has_starter = self._item_has_starter_signal(item)
+            if has_starter:
+                kept.append(item); continue
+            # 解析 7D 动量
+            mom_1d = None
+            try:
+                # 优先从 details 中读
+                det = item.get("details") if isinstance(item.get("details"), dict) else {}
+                mom_str = str(det.get("7D动量", det.get("momentum_1d", "")) or "")
+                if mom_str:
+                    # 格式如 "+19.40%"
+                    mom_1d = float(mom_str.replace("%", "").replace("+", "").strip())
+                else:
+                    # signals 中找
+                    sigs = item.get("signals") or []
+                    for s in sigs:
+                        s = str(s)
+                        if "7D" in s:
+                            # 例如 "动量(1H+1.0% 4H+1.6% 7D+19.4% 衰减-0.8)"
+                            idx = s.find("7D")
+                            seg = s[idx+2:idx+12].strip()
+                            for tok in seg.replace("%", " ").split():
+                                try:
+                                    mom_1d = float(tok)
+                                    break
+                                except Exception:
+                                    continue
+                            if mom_1d is not None:
+                                break
+            except Exception:
+                mom_1d = None
+            if mom_1d is None:
+                kept.append(item); continue
+            direction = str(item.get("direction", "WAIT")).upper()
+            # 多头方向但 7D 涨幅过大 → 老趋势；空头方向但 7D 跌幅过大 → 老趋势
+            if direction in {"BUY", "LONG"} and mom_1d > hard_pct:
+                logger.info(f"[老趋势过滤] 淘汰 {item.get('symbol')}: 7D+{mom_1d:.1f}%>{hard_pct:.0f}% 且无启动信号")
+                continue
+            if direction in {"SELL", "SHORT"} and mom_1d < -hard_pct:
+                logger.info(f"[老趋势过滤] 淘汰 {item.get('symbol')}: 7D{mom_1d:.1f}%<-{hard_pct:.0f}% 且无启动信号")
+                continue
+            kept.append(item)
+        return kept
+
+    # ── v6.0: 组合层启动信号显式加分 ──────────────────────────────────────
+    def _apply_h1_starter_combo_bonus(self, results: List[Dict]) -> List[Dict]:
+        """组合层对带启动信号的 item 再加 3-6 分（在 trading_filters 加分封顶之前）。
+
+        这是为了让"两条链路（子策略评分 + 共识评分）"中至少有一处明确表达
+        '这个币是启动信号'，避免被 BTC/费率/共振等通用过滤器淹没。
+        """
+        if not bool(self.config.get("h1_starter_signal_enabled", True)):
+            return results
+        for item in results:
+            if not self._item_has_starter_signal(item):
+                continue
+            cur = float(item.get("score", 0) or 0)
+            # 共识 item 给 6 分；个体给 4 分
+            is_consensus = "共振" in str(item.get("category", ""))
+            bonus = 6.0 if is_consensus else 4.0
+            item["score"] = round(min(100.0, cur + bonus), 2)
+            d = item.setdefault("details", {})
+            d["启动信号加分"] = f"+{bonus:.1f}（H1启动绿色通道）"
+        return results
+
     # ── 统一应用所有交易视角过滤器 ──────────────────────────────────────────
     def _apply_trading_filters(self, results: List[Dict], symbols: List) -> List[Dict]:
         """按顺序应用所有v4.2交易视角过滤器（v4.4: 加分上限保护）"""
         btc_ctx = self._get_btc_context(symbols)
+        # P2-5: BTC 熔断检查（所有过滤器之前）
+        is_break, break_reason = self._btc_circuit_breaker(btc_ctx)
+        if is_break:
+            logger.warning(f"[BTC熔断] 全面熔断 {len(results)} 条信号: {break_reason}")
+            for r in results:
+                r["passed"] = False
+                r.setdefault("details", {})["BTC熔断"] = f"⚠ {break_reason}"
+            return []
         # 记录每个结果的原始分，后续加分项总上限 15 分
         orig_scores = {id(r): float(r.get("score", 0) or 0) for r in results}
         # v5.0: 最先执行入场时机过滤（硬拒绝老趋势 + 早启动/回调再启动加减分）
         results = self._apply_h1_entry_timing_filter(results, symbols)
+        # v6.1: 老趋势硬过滤（基于子策略报告的 7D 动量，启动信号豁免）
+        results = self._apply_old_trend_filter(results)
+        # P2-2: H4 方向硬过滤（在 H1 时机之后，进入加分前）
+        results = self._apply_h4_direction_hard_filter(results, symbols)
+        # v6.0: H1 启动信号显式加分（给到带 H1 启动信号的品种额外分数）
+        results = self._apply_h1_starter_combo_bonus(results)
         results = self._apply_h1_breakout_scoring(results, symbols)
         results = self._apply_btc_correlation_filter(results, btc_ctx)
         results = self._apply_funding_filter(results, symbols)
@@ -5987,23 +7315,39 @@ class AICrossSectionDualFactorComboScanner(BaseScannerStrategy if _HAS_SCANNER_B
         result["signals"] = sigs
         return result
 
-    # ── 子策略加载（v2: 多路径查找）─────────────────────────────────────────
+    # ── 子策略加载（v6.0 P1-5: 懒加载 + 失败追踪）────────────────────────
+    # 子策略定义（class引用，不立即实例化）
+    _CHILD_DEFS = [
+        ("截面多因子",      "ACrossSectionalMultiFactorScannerStrategy",  970),
+        ("AI因子挖掘",      "AIAutomatedAlphaCryptoScannerStrategy",       960),
+        ("DRL小时趋势启动", "DRLMetaHourlyTrendStartScannerStrategy",      965),
+        ("XGBoost截面排序", "XGBoostCrossSectionalRanker",                 955),
+        ("AI订单流动量",    "AIOrderflowMomentumBreakoutScanner",          945),
+    ]
+
     def _build_child_strategies(self):
+        """v6.0 P1-5: 立即实例化所有子策略（保持原行为以兼容）。
+        失败的子策略记录到 self._failed_engines 而非吞掉。
+        """
         strategies = []
-        child_defs = [
-            ("截面多因子",      ACrossSectionalMultiFactorScannerStrategy,  970),
-            ("AI因子挖掘",      AIAutomatedAlphaCryptoScannerStrategy,       960),
-            ("DRL小时趋势启动", DRLMetaHourlyTrendStartScannerStrategy,      965),
-            ("XGBoost截面排序", XGBoostCrossSectionalRanker,                 955),
-            ("AI订单流动量",    AIOrderflowMomentumBreakoutScanner,          945),
-        ]
-        for sn, cls, priority in child_defs:
+        # 通过模块全局名找类（避免硬编码 import 在文件顶部）
+        glb = globals()
+        # 失败追踪
+        if not hasattr(self, "_failed_engines"):
+            self._failed_engines: Dict[str, str] = {}
+        for sn, cls_name, priority in self._CHILD_DEFS:
+            cls = glb.get(cls_name)
+            if cls is None:
+                self._failed_engines[sn] = f"类 {cls_name} 未定义"
+                logger.error(f"[组合] 跳过 {sn}: {self._failed_engines[sn]}")
+                continue
             try:
                 child_cfg = self._child_config(sn)
                 strategies.append((sn, cls(child_cfg), priority))
                 logger.info(f"[组合] 已加载 {sn}")
             except Exception as e:
-                logger.error(f"[组合] 跳过 {sn}: 初始化失败 {e}")
+                self._failed_engines[sn] = f"初始化失败: {type(e).__name__}: {e}"
+                logger.error(f"[组合] 跳过 {sn}: {self._failed_engines[sn]}")
         return strategies
 
     # 子策略允许透传的键白名单（避免组合层 70+ 参数污染子策略命名空间）
@@ -6027,6 +7371,9 @@ class AICrossSectionDualFactorComboScanner(BaseScannerStrategy if _HAS_SCANNER_B
         "enable_early_trend_factors", "early_trend_min_trigger",
         # v5.0 早启动
         "h1_trend_age_hard_limit", "require_early_trend_entry", "early_trend_edge_discount",
+        # v6.0 启动+回调精准捕捉
+        "h1_starter_signal_enabled", "h1_starter_min_confidence",
+        "h1_starter_skip_m3_filter",
     }
 
     def _child_config(self, strategy_name: str) -> Dict[str, Any]:

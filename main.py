@@ -3,7 +3,8 @@ import os
 import sys
 
 
-ANDROID_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
+ANDROID_DIR = os.path.join(PROJECT_ROOT, "android")
 ANDROID_MAIN = os.path.join(ANDROID_DIR, "main.py")
 
 if ANDROID_DIR not in sys.path:

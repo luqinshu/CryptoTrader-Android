@@ -132,6 +132,74 @@ CONFIG_SCHEMA: Dict[str, Any] = {
     "h1_pullback_zone_enabled": {"type": "bool",  "default": True,         "label": "H1回踩质量区间精细化"},
     "h1_pullback_zone_above_max": {"type": "float", "default": 3.0,        "label": "多头H1收盘高于中轨最大%(过高=错过)"},
     "h1_pullback_zone_below_max": {"type": "float", "default": 0.5,        "label": "多头H1收盘低于中轨最大%(过低=仍跌)"},
+
+    # ── v1.6 P1-1 H1 回踩参考改 D1 EMA20 ────────────────────────────────────
+    "h1_use_d1_ema_anchor":     {"type": "bool",  "default": True,         "label": "v1.6 H1回踩参考D1 EMA20(替代H1中轨独立判断)"},
+    "h1_d1_anchor_max_atr":     {"type": "float", "default": 1.5,          "label": "H1距D1 EMA锚最大ATR倍数(超出=已远离趋势线)"},
+
+    # ── v1.6 P1-2 swing 摆动点 + Fibonacci 回踩位 ───────────────────────────
+    "swing_detection_enabled":  {"type": "bool",  "default": True,         "label": "v1.6启用真实摆动点检测(左右各N根确认)"},
+    "swing_confirm_bars":       {"type": "int",   "default": 2,            "label": "摆动点左右确认根数"},
+    "swing_lookback":           {"type": "int",   "default": 30,           "label": "swing搜索回溯H1根数"},
+    "fib_validate_enabled":     {"type": "bool",  "default": True,         "label": "v1.6启用Fibonacci回踩位验证"},
+    "fib_tolerance_pct":        {"type": "float", "default": 2.0,          "label": "Fib位容差%(命中加分)"},
+    "fib_max_bonus":            {"type": "float", "default": 12.0,         "label": "Fib命中最大加分(61.8=12, 50=10, 38.2=8)"},
+
+    # ── v1.6 P1-3 量能趋势按回踩段例外 ────────────────────────────────────
+    "h1_vol_trend_pullback_relaxed": {"type": "bool", "default": True,     "label": "v1.6 回踩期(价格<中轨)放宽量能门槛"},
+    "h1_vol_trend_pullback_factor":  {"type": "float","default": 0.75,     "label": "回踩期量能门槛打折系数(0.80×0.75=0.60)"},
+
+    # ── v1.6 P1-4 触发等级降级改扣分 ────────────────────────────────────
+    "trig_consec_fail_penalty": {"type": "float", "default": 5.0,          "label": "v1.6 trig_level=2 时柱体未连续的扣分(替代降级)"},
+
+    # ── v1.6 P1-5 市场状态自适应权重 ────────────────────────────────────
+    "market_state_weights_enabled": {"type": "bool", "default": True,      "label": "v1.6启用市场状态自适应评分权重"},
+
+    # ── v1.6 P2-1 H4 共振 v2 多维度评分 ────────────────────────────────────
+    "h4_resonance_v2_enabled":  {"type": "bool",  "default": True,         "label": "v1.6 H4共振v2(方向40%+斜率强度30%+MACD柱30%)"},
+    "h4_resonance_v2_max":      {"type": "float", "default": 12.0,         "label": "H4共振v2最大加分"},
+    "h4_resonance_v2_hard_floor": {"type": "float","default": 0.20,        "label": "H4共振v2硬拒下限(<此值=H4严重逆向)"},
+
+    # ── v1.6 P2-3 VWAP 偏离度 ────────────────────────────────────
+    "vwap_validate_enabled":    {"type": "bool",  "default": True,         "label": "v1.6启用VWAP机构成本支撑验证"},
+    "vwap_lookback":            {"type": "int",   "default": 50,           "label": "VWAP计算回溯H1根数"},
+    "vwap_max_dev_pct":         {"type": "float", "default": 4.0,          "label": "VWAP最大允许偏离%(超出=深度偏离)"},
+    "vwap_near_pct":            {"type": "float", "default": 1.5,          "label": "VWAP命中容差%(±此内=机构成本支撑)"},
+    "vwap_max_bonus":            {"type": "float","default": 8.0,          "label": "VWAP命中最大加分"},
+
+    # ── v1.6 P2-4 信号持久性 ────────────────────────────────────
+    "persistence_enabled":      {"type": "bool",  "default": True,         "label": "v1.6启用信号持久性追踪"},
+    "persistence_min_count":    {"type": "int",   "default": 2,            "label": "连续N次扫描出现才稳定"},
+    "persistence_bonus":        {"type": "float", "default": 4.0,          "label": "稳定信号加分"},
+
+    # ── v1.6 P2-5 Volume Profile POC ────────────────────────────────────
+    "vp_poc_validate_enabled":  {"type": "bool",  "default": True,         "label": "v1.6启用VP_POC成交量集中区验证"},
+    "vp_poc_lookback":          {"type": "int",   "default": 50,           "label": "VP_POC回溯H1根数"},
+    "vp_poc_bins":              {"type": "int",   "default": 20,           "label": "VP_POC价格分桶数"},
+    "vp_poc_tolerance_pct":     {"type": "float", "default": 2.0,          "label": "VP_POC命中容差%"},
+    "vp_poc_max_bonus":         {"type": "float", "default": 8.0,          "label": "VP_POC命中最大加分"},
+
+    # ── v1.6 P2-6 多根K线连续蓄势 ────────────────────────────────────
+    "candle_consec_enabled":    {"type": "bool",  "default": True,         "label": "v1.6启用多根K线连续蓄势识别"},
+    "candle_consec_bonus":      {"type": "float", "default": 6.0,          "label": "连续3根同向K线最大加分"},
+
+    # ── v1.6 P3-1 动态止损止盈 ────────────────────────────────────
+    "dynamic_sl_tp_enabled":    {"type": "bool",  "default": True,         "label": "v1.6启用动态止损止盈(联动swing/Fib/BB)"},
+    "min_rr_ratio":             {"type": "float", "default": 1.5,          "label": "最小盈亏比(<此值软扣分)"},
+    "rr_too_low_penalty":       {"type": "float", "default": 6.0,          "label": "盈亏比过低扣分"},
+
+    # ── v1.6 P3-7 BTC 环境 ATR 自适应 ────────────────────────────────────
+    "btc_env_atr_adaptive":     {"type": "bool",  "default": True,         "label": "v1.6 BTC环境阈值随BTC ATR自适应"},
+    "btc_env_atr_mult":         {"type": "float", "default": 1.0,          "label": "BTC ATR倍数(阈值=BTC ATR%×此值)"},
+
+    # ── v1.6 P4-5 z-score 趋势加速度 ────────────────────────────────────
+    "zscore_health_enabled":    {"type": "bool",  "default": True,         "label": "v1.6启用z-score趋势加速度评估"},
+    "zscore_atr_period":        {"type": "int",   "default": 14,           "label": "z-score计算ATR周期"},
+    "zscore_optimal_max":       {"type": "float", "default": 0.5,          "label": "z<此值=最优早期入场(满分加分)"},
+    "zscore_emerging_max":      {"type": "float", "default": 1.5,          "label": "z=此值=萌芽期(线性递减)"},
+    "zscore_extended_max":      {"type": "float", "default": 2.5,          "label": "z=此值=已透支(最大扣分)"},
+    "zscore_max_bonus":         {"type": "float", "default": 8.0,          "label": "z-score最大加分"},
+    "zscore_max_penalty":       {"type": "float", "default": 12.0,         "label": "z-score最大扣分"},
 }
 
 _DEFAULTS = {k: v["default"] for k, v in CONFIG_SCHEMA.items()}
@@ -199,6 +267,77 @@ def _slope_angle(series: pd.Series, lookback: int) -> float:
     sl = np.polyfit(x, y, 1)[0]
     return float(np.degrees(np.arctan(sl / max(np.mean(y), 1e-9))))
 
+# ─── v1.6 新增辅助函数 ────────────────────────────────────────────────────
+
+def _find_swing_high(highs: list, confirm: int = 2) -> Optional[Tuple[int, float]]:
+    """真实摆动高点：左右各 confirm 根都比它低。返回 (idx_in_list, value)。"""
+    n = len(highs)
+    best_idx, best_val = None, None
+    for i in range(confirm, n - confirm):
+        if all(highs[j] < highs[i] for j in range(i - confirm, i)) and \
+           all(highs[j] < highs[i] for j in range(i + 1, i + confirm + 1)):
+            if best_val is None or highs[i] > best_val:
+                best_val, best_idx = highs[i], i
+    return (best_idx, best_val) if best_val is not None else None
+
+
+def _find_swing_low(lows: list, confirm: int = 2) -> Optional[Tuple[int, float]]:
+    """真实摆动低点：左右各 confirm 根都比它高。返回 (idx_in_list, value)。"""
+    n = len(lows)
+    best_idx, best_val = None, None
+    for i in range(confirm, n - confirm):
+        if all(lows[j] > lows[i] for j in range(i - confirm, i)) and \
+           all(lows[j] > lows[i] for j in range(i + 1, i + confirm + 1)):
+            if best_val is None or lows[i] < best_val:
+                best_val, best_idx = lows[i], i
+    return (best_idx, best_val) if best_val is not None else None
+
+
+def _calc_vwap(closes: list, highs: list, lows: list, vols: list, lookback: int = 50) -> float:
+    """VWAP = Σ(典型价×成交量) / Σ成交量。代表机构成本线。"""
+    n = min(lookback, len(closes))
+    if n < 2:
+        return float(closes[-1]) if closes else 0.0
+    tp_v_sum = v_sum = 0.0
+    for i in range(len(closes) - n, len(closes)):
+        tp = (highs[i] + lows[i] + closes[i]) / 3.0
+        v  = max(float(vols[i]), 0.0)
+        tp_v_sum += tp * v
+        v_sum    += v
+    return tp_v_sum / max(v_sum, 1e-9)
+
+
+def _calc_vp_poc(closes: list, highs: list, lows: list, vols: list,
+                 lookback: int = 50, bins: int = 20) -> float:
+    """Volume Profile POC = 成交量最密集的价格区间中点。"""
+    n = min(lookback, len(closes))
+    if n < 5 or bins < 2:
+        return 0.0
+    seg_lo = min(lows[len(lows) - n:])
+    seg_hi = max(highs[len(highs) - n:])
+    if seg_hi <= seg_lo or (seg_hi - seg_lo) < 1e-9:
+        return float(closes[-1]) if closes else 0.0
+    bin_size = (seg_hi - seg_lo) / bins
+    vol_bins = [0.0] * bins
+    for i in range(len(closes) - n, len(closes)):
+        tp = (highs[i] + lows[i] + closes[i]) / 3.0
+        b_idx = min(int((tp - seg_lo) / bin_size), bins - 1)
+        vol_bins[b_idx] += max(float(vols[i]), 0.0)
+    max_bin = vol_bins.index(max(vol_bins))
+    return seg_lo + (max_bin + 0.5) * bin_size
+
+
+def _detect_market_state(d1_atr_pct: float, d1_adx: float, d1_slope_deg: float) -> str:
+    """根据 D1 指标自动识别市场状态。"""
+    if d1_atr_pct >= 4.5:
+        return "volatile"
+    if d1_adx >= 25 and abs(d1_slope_deg) >= 0.30:
+        return "trending"
+    if d1_adx < 18 and abs(d1_slope_deg) < 0.20:
+        return "range"
+    return "neutral"
+
+
 def _normalize_cols(df: pd.DataFrame) -> pd.DataFrame:
     """统一列名：回测引擎用 timestamp/open/high/low/close/volume → ts/o/h/l/c/vol"""
     if df is None or len(df) == 0:
@@ -236,6 +375,10 @@ class XiaoYueBollMacdScanner(BaseScannerStrategy if _HAS_BASE else object):
         if _HAS_BASE and hasattr(super(), "__init__"):
             try: super().__init__(self.config)
             except Exception: pass
+        # P2-4: 信号持久性追踪
+        self._signal_history: Dict[str, Tuple[int, float]] = {}     # key=symbol:dir → (last_scan_id, score)
+        self._persist_counts: Dict[str, int] = {}
+        self._scan_counter: int = 0
 
     def _init_conditions(self):
         if ScanCondition is None: return
@@ -307,11 +450,14 @@ class XiaoYueBollMacdScanner(BaseScannerStrategy if _HAS_BASE else object):
 
         # Step 1b: H4 共振确认
         h4_bonus, h4_det = self._step1b_h4_resonance(h4, d1_dir)
-        # 改进A：H4明确反向时硬拒绝
+        # 改进A：H4明确反向时硬拒绝（兼容 v2 的 -999 标记）
         if bool(self.config.get("h4_hard_filter_enabled", True)):
             h4_hard_thr = float(self.config.get("h4_hard_filter_threshold", -10.0))
-            if h4_bonus <= h4_hard_thr:
-                return fail(f"H4反向共振拒绝(H4分={h4_bonus:.1f}≤{h4_hard_thr:.1f})")
+            if h4_bonus <= -999.0 or h4_bonus <= h4_hard_thr:
+                return fail(f"H4反向共振拒绝({h4_det})")
+        # P2-1: v2 路径的负值要钳制到合理范围避免影响后续累加
+        if h4_bonus <= -999.0:
+            h4_bonus = float(self.config.get("h4_diverge_penalty", 15.0)) * -1.0
 
         h1_ok, h1_sc, h1_det, h1_atr = self._step2_h1_pullback(h1, d1_dir)
         if not h1_ok: return fail(f"1H: {h1_det}")
@@ -334,14 +480,58 @@ class XiaoYueBollMacdScanner(BaseScannerStrategy if _HAS_BASE else object):
                 pass
 
         # 改进F：H1 量能趋势验证（近5根均量 ≥ 前10根均量×阈值）
+        # P1-3: 回踩期(价格<中轨)放宽门槛，避免误杀真实回踩信号
         if bool(self.config.get("h1_vol_trend_enabled", True)) and len(h1) >= 16:
             try:
                 vol_series = h1["vol"]
                 recent5_avg = float(vol_series.iloc[-5:].mean())
                 prior10_avg = float(vol_series.iloc[-15:-5].mean())
                 vol_trend_ratio = float(self.config.get("h1_vol_trend_ratio", 0.80))
-                if prior10_avg > 0 and recent5_avg < prior10_avg * vol_trend_ratio:
-                    return fail(f"H1量能持续性不足(近5均={recent5_avg:.0f} < {vol_trend_ratio:.0%}×前10均={prior10_avg:.0f})")
+                # P1-3: 检测当前是否处于回踩期
+                in_pullback = False
+                if bool(self.config.get("h1_vol_trend_pullback_relaxed", True)):
+                    try:
+                        h1_b = _bollinger(h1, int(self.config["boll_period"]), float(self.config["boll_std_mult"]))
+                        h1_mid = float(h1_b["boll_mid"].iloc[-1])
+                        h1_close = float(h1["c"].iloc[-1])
+                        if d1_dir == "bull":
+                            in_pullback = h1_close < h1_mid       # 多头回踩 = 价格低于中轨
+                        else:
+                            in_pullback = h1_close > h1_mid       # 空头反弹 = 价格高于中轨
+                    except Exception:
+                        in_pullback = False
+                effective_ratio = vol_trend_ratio
+                if in_pullback:
+                    pb_factor = float(self.config.get("h1_vol_trend_pullback_factor", 0.75))
+                    effective_ratio = vol_trend_ratio * pb_factor    # 0.80×0.75 = 0.60
+                if prior10_avg > 0 and recent5_avg < prior10_avg * effective_ratio:
+                    pb_tag = "[回踩段宽松]" if in_pullback else ""
+                    return fail(f"H1量能持续性不足{pb_tag}(近5均={recent5_avg:.0f} < {effective_ratio:.0%}×前10均={prior10_avg:.0f})")
+            except Exception:
+                pass
+
+        # P1-1: H1 回踩参考 D1 EMA20（解决"H1中轨与D1趋势线脱钩"问题）
+        # H1 价格距 D1 EMA20 的 ATR 倍数 > h1_d1_anchor_max_atr → 已远离趋势线，拒绝
+        if bool(self.config.get("h1_use_d1_ema_anchor", True)) and len(big_df) >= 22:
+            try:
+                d1_ema_period = int(self.config.get("boll_period", 20))
+                d1_ema20 = float(big_df["c"].ewm(span=d1_ema_period, adjust=False).mean().iloc[-1])
+                h1_close = float(h1["c"].iloc[-1])
+                h1_atr_v = float(_atr(h1, 14))
+                d1_anchor_max = float(self.config.get("h1_d1_anchor_max_atr", 1.5))
+                if h1_atr_v > 0 and d1_ema20 > 0:
+                    dist_atr_mult = abs(h1_close - d1_ema20) / h1_atr_v
+                    # 多头：价格应接近或略高于 D1 EMA20；超出 ×ATR 距离 = 远离趋势线
+                    # 空头：价格应接近或略低于 D1 EMA20
+                    direction_align = (
+                        (d1_dir == "bull" and h1_close >= d1_ema20 - h1_atr_v * 0.5) or
+                        (d1_dir == "bear" and h1_close <= d1_ema20 + h1_atr_v * 0.5)
+                    )
+                    if (dist_atr_mult > d1_anchor_max) or (not direction_align):
+                        return fail(
+                            f"H1距D1 EMA{d1_ema_period}过远({dist_atr_mult:.2f}×ATR > {d1_anchor_max:.2f}"
+                            f" 或方向不符) 已脱离趋势线"
+                        )
             except Exception:
                 pass
 
@@ -373,8 +563,26 @@ class XiaoYueBollMacdScanner(BaseScannerStrategy if _HAS_BASE else object):
         m15_ok, m15_sc, m15_det = self._step3_m15_entry(m15, d1_dir)
         if not m15_ok: return fail(f"15m: {m15_det}")
 
-        # 基础评分（权重：D1 25% + H4共振加减 + H1 30% + 15m 40% + 空余5%给K线形态）
-        score = round(_clamp(d1_sc * 0.25 + h1_sc * 0.30 + m15_sc * 0.40, 0, 100), 2)
+        # P1-5: 市场状态自适应权重
+        d1_metrics = getattr(self, "_last_d1_metrics", {})
+        market_state = "neutral"
+        if bool(self.config.get("market_state_weights_enabled", True)) and d1_metrics:
+            market_state = _detect_market_state(
+                d1_metrics.get("atr_pct", 2.0),
+                d1_metrics.get("adx", 18.0),
+                d1_metrics.get("slope_deg", 0.0),
+            )
+        # 各市场状态的 (D1, H1, 15m) 权重
+        weights_map = {
+            "trending": (0.20, 0.25, 0.55),     # 趋势市重起爆
+            "range":    (0.35, 0.35, 0.30),     # 震荡市重多周期共振
+            "volatile": (0.20, 0.30, 0.50),     # 高波动重 H1+15m
+            "neutral":  (0.25, 0.30, 0.45),     # 默认（原 D1 25% + H1 30% + 15m 45%）
+        }
+        d_w, h_w, m_w = weights_map.get(market_state, weights_map["neutral"])
+
+        # 基础评分（权重市场状态自适应）
+        score = round(_clamp(d1_sc * d_w + h1_sc * h_w + m15_sc * m_w, 0, 100), 2)
         score = _clamp(score + h4_bonus, 0, 100)
 
         # Step 4: K 线形态质量评分（15m 最近一根）
@@ -386,8 +594,171 @@ class XiaoYueBollMacdScanner(BaseScannerStrategy if _HAS_BASE else object):
             candle_bonus = cq_raw * cq_weight   # 最大贡献 = 50 * 0.10 = 5 分
             score = _clamp(score + candle_bonus, 0, 100)
 
+        # ── P2-6: 多根 K 线连续蓄势（15m 末 3 根同向 + 量能递增）───────────
+        consec_bonus = 0.0
+        consec_det   = ""
+        if bool(self.config.get("candle_consec_enabled", True)) and len(m15) >= 3:
+            try:
+                m15_closes = m15["c"].tolist()
+                m15_opens  = m15["o"].tolist() if "o" in m15.columns else m15["c"].tolist()
+                m15_vols   = m15["vol"].tolist()
+                last3_dir  = []
+                for i in [-3, -2, -1]:
+                    o = float(m15_opens[i]); c = float(m15_closes[i])
+                    last3_dir.append("up" if c > o else "down" if c < o else "flat")
+                vol_increasing = float(m15_vols[-1]) >= float(m15_vols[-2]) >= float(m15_vols[-3]) * 0.95
+                want = "up" if d1_dir == "bull" else "down"
+                same_dir_count = sum(1 for d in last3_dir if d == want)
+                if same_dir_count >= 2 and vol_increasing:
+                    max_b = float(self.config.get("candle_consec_bonus", 6.0))
+                    consec_bonus = max_b * (same_dir_count / 3.0)
+                    score = _clamp(score + consec_bonus, 0, 100)
+                    consec_det = f"末3根{same_dir_count}/3{want} 量能递增 +{consec_bonus:.1f}"
+            except Exception:
+                pass
+
+        # ── P1-2: swing 摆动点 + Fibonacci 回踩位验证（基于 H1）───────────
+        fib_bonus = 0.0
+        fib_det = ""
+        swing_info: Dict[str, Any] = {}
+        if bool(self.config.get("swing_detection_enabled", True)) and len(h1) >= 10:
+            try:
+                sw_confirm = int(self.config.get("swing_confirm_bars", 2))
+                sw_look    = int(self.config.get("swing_lookback", 30))
+                seg_n      = min(sw_look, len(h1))
+                highs_seg  = h1["h"].iloc[-seg_n:].tolist()
+                lows_seg   = h1["l"].iloc[-seg_n:].tolist()
+                cur_close  = float(h1["c"].iloc[-1])
+                if d1_dir == "bull":
+                    sh = _find_swing_high(highs_seg, sw_confirm)
+                    sl = _find_swing_low(lows_seg, sw_confirm)
+                    if sh and sl and sh[1] > sl[1]:
+                        swing_high = sh[1]; swing_low = sl[1]
+                        fib_range = swing_high - swing_low
+                        if fib_range > 0 and bool(self.config.get("fib_validate_enabled", True)):
+                            tol  = float(self.config.get("fib_tolerance_pct", 2.0))
+                            maxb = float(self.config.get("fib_max_bonus", 12.0))
+                            for lvl_name, ratio, weight in [("61.8%", 0.618, 1.0), ("50.0%", 0.500, 0.83), ("38.2%", 0.382, 0.67)]:
+                                fib_price = swing_high - fib_range * ratio
+                                if fib_price > 0:
+                                    dev = abs(cur_close - fib_price) / fib_price * 100
+                                    if dev <= tol:
+                                        fib_bonus = max(fib_bonus, maxb * weight)
+                                        fib_det = f"Fib{lvl_name}命中(dev{dev:.2f}%) +{fib_bonus:.1f}"
+                        swing_info = {"swing_high": swing_high, "swing_low": swing_low}
+                else:
+                    sh = _find_swing_high(highs_seg, sw_confirm)
+                    sl = _find_swing_low(lows_seg, sw_confirm)
+                    if sh and sl and sh[1] > sl[1]:
+                        swing_high = sh[1]; swing_low = sl[1]
+                        fib_range = swing_high - swing_low
+                        if fib_range > 0 and bool(self.config.get("fib_validate_enabled", True)):
+                            tol  = float(self.config.get("fib_tolerance_pct", 2.0))
+                            maxb = float(self.config.get("fib_max_bonus", 12.0))
+                            for lvl_name, ratio, weight in [("61.8%", 0.618, 1.0), ("50.0%", 0.500, 0.83), ("38.2%", 0.382, 0.67)]:
+                                fib_price = swing_low + fib_range * ratio
+                                if fib_price > 0:
+                                    dev = abs(cur_close - fib_price) / fib_price * 100
+                                    if dev <= tol:
+                                        fib_bonus = max(fib_bonus, maxb * weight)
+                                        fib_det = f"Fib{lvl_name}命中(dev{dev:.2f}%) +{fib_bonus:.1f}"
+                        swing_info = {"swing_high": swing_high, "swing_low": swing_low}
+                if fib_bonus > 0:
+                    score = _clamp(score + fib_bonus, 0, 100)
+            except Exception:
+                pass
+
+        # ── P2-3: VWAP 机构成本支撑验证（基于 H1）─────────────────────────
+        vwap_bonus = 0.0
+        vwap_det = ""
+        if bool(self.config.get("vwap_validate_enabled", True)) and len(h1) >= 10:
+            try:
+                vwap_lb   = int(self.config.get("vwap_lookback", 50))
+                vwap_near = float(self.config.get("vwap_near_pct", 1.5))
+                vwap_max  = float(self.config.get("vwap_max_dev_pct", 4.0))
+                vwap_maxb = float(self.config.get("vwap_max_bonus", 8.0))
+                v_closes = h1["c"].tolist()
+                v_highs  = h1["h"].tolist()
+                v_lows   = h1["l"].tolist()
+                v_vols   = h1["vol"].tolist()
+                vwap_val = _calc_vwap(v_closes, v_highs, v_lows, v_vols, vwap_lb)
+                cur_close = float(v_closes[-1])
+                vwap_dev = abs(cur_close - vwap_val) / max(vwap_val, 1e-9) * 100
+                if vwap_dev <= vwap_near:
+                    vwap_bonus = vwap_maxb
+                elif vwap_dev <= vwap_max:
+                    vwap_bonus = vwap_maxb * (1.0 - (vwap_dev - vwap_near) / max(vwap_max - vwap_near, 1e-9))
+                if vwap_bonus > 0:
+                    score = _clamp(score + vwap_bonus, 0, 100)
+                    vwap_det = f"VWAP偏离{vwap_dev:.2f}% +{vwap_bonus:.1f}"
+            except Exception:
+                pass
+
+        # ── P2-5: Volume Profile POC 验证（基于 H1）─────────────────────────
+        vp_bonus = 0.0
+        vp_det = ""
+        if bool(self.config.get("vp_poc_validate_enabled", True)) and len(h1) >= 10:
+            try:
+                vp_lb  = int(self.config.get("vp_poc_lookback", 50))
+                vp_bn  = int(self.config.get("vp_poc_bins", 20))
+                vp_tol = float(self.config.get("vp_poc_tolerance_pct", 2.0))
+                vp_max = float(self.config.get("vp_poc_max_bonus", 8.0))
+                p_closes = h1["c"].tolist()
+                p_highs  = h1["h"].tolist()
+                p_lows   = h1["l"].tolist()
+                p_vols   = h1["vol"].tolist()
+                vp_poc_val = _calc_vp_poc(p_closes, p_highs, p_lows, p_vols, vp_lb, vp_bn)
+                if vp_poc_val > 0:
+                    cur_close = float(p_closes[-1])
+                    vp_dev = abs(cur_close - vp_poc_val) / vp_poc_val * 100
+                    if vp_dev <= vp_tol:
+                        vp_bonus = vp_max
+                    elif vp_dev <= vp_tol * 2.5:
+                        vp_bonus = vp_max * (1.0 - (vp_dev - vp_tol) / max(vp_tol * 1.5, 1e-9))
+                    if vp_bonus > 0:
+                        score = _clamp(score + vp_bonus, 0, 100)
+                        vp_det = f"VP_POC偏离{vp_dev:.2f}% +{vp_bonus:.1f}"
+            except Exception:
+                pass
+
+        # ── P4-5: z-score 趋势加速度评估（基于 D1）─────────────────────────
+        zscore_adj = 0.0
+        z_label = ""
+        if bool(self.config.get("zscore_health_enabled", True)) and len(big_df) >= 22:
+            try:
+                z_period   = int(self.config.get("boll_period", 20))
+                d1_ema_z   = float(big_df["c"].ewm(span=z_period, adjust=False).mean().iloc[-1])
+                d1_atr_v   = float(_atr(big_df, int(self.config.get("zscore_atr_period", 14))))
+                d1_close   = float(big_df["c"].iloc[-1])
+                if d1_atr_v > 0 and d1_ema_z > 0:
+                    z_signed = ((d1_close - d1_ema_z) / d1_atr_v) if d1_dir == "bull" \
+                               else ((d1_ema_z - d1_close) / d1_atr_v)
+                    z_opt   = float(self.config.get("zscore_optimal_max", 0.5))
+                    z_emrg  = float(self.config.get("zscore_emerging_max", 1.5))
+                    z_extd  = float(self.config.get("zscore_extended_max", 2.5))
+                    z_max_b = float(self.config.get("zscore_max_bonus", 8.0))
+                    z_max_p = float(self.config.get("zscore_max_penalty", 12.0))
+                    if z_signed <= z_opt:
+                        zscore_adj = z_max_b
+                        z_label = f"早期(z={z_signed:.2f})"
+                    elif z_signed <= z_emrg:
+                        ratio = (z_signed - z_opt) / max(z_emrg - z_opt, 1e-9)
+                        zscore_adj = z_max_b * (1.0 - ratio)
+                        z_label = f"萌芽(z={z_signed:.2f})"
+                    elif z_signed <= z_extd:
+                        ratio = (z_signed - z_emrg) / max(z_extd - z_emrg, 1e-9)
+                        zscore_adj = -z_max_p * ratio
+                        z_label = f"透支(z={z_signed:.2f})"
+                    else:
+                        zscore_adj = -z_max_p
+                        z_label = f"重度透支(z={z_signed:.2f})"
+                    score = _clamp(score + zscore_adj, 0, 100)
+            except Exception:
+                pass
+
         score, details, risk_cfg = self._apply_risk(
-            score, inst_id, ed, d1_dir, atr_pct, lp, d1_det, h1_det, m15_det)
+            score, inst_id, ed, d1_dir, atr_pct, lp, d1_det, h1_det, m15_det,
+            swing_info=swing_info, h1=h1, market_state=market_state)
 
         # Step 5: RSI 背离过滤（在 _apply_risk 之后，直接修改 score）
         if bool(self.config.get("rsi_diverge_enabled", True)) and len(big_df) >= 20:
@@ -401,22 +772,83 @@ class XiaoYueBollMacdScanner(BaseScannerStrategy if _HAS_BASE else object):
             details["H4共振"] = h4_det
         if candle_det:
             details["K线质量"] = candle_det
+        # P2-6: 多根连续蓄势
+        if consec_det:
+            details["连续蓄势"] = consec_det
+        # P1-2: Fib 命中
+        if fib_det:
+            details["Fib命中"] = fib_det
+        # P2-3: VWAP
+        if vwap_det:
+            details["VWAP"] = vwap_det
+        # P2-5: VP_POC
+        if vp_det:
+            details["VP_POC"] = vp_det
+        # P4-5: z-score
+        if z_label:
+            details["z-score"] = z_label + (f" {zscore_adj:+.1f}分" if abs(zscore_adj) > 0.01 else "")
+
+        # ── P2-4: 信号持久性追踪（连续 N 次扫描出现 → 加分）─────────────
+        persistence_bonus = 0.0
+        if bool(self.config.get("persistence_enabled", True)):
+            self._scan_counter += 1
+            dir_str = "BUY" if d1_dir == "bull" else "SELL"
+            key = f"{inst_id}:{dir_str}"
+            prev = self._signal_history.get(key)
+            if prev and self._scan_counter - prev[0] <= 2:   # 连续 2 次扫描内
+                count = self._persist_counts.get(key, 0) + 1
+                self._persist_counts[key] = count
+                min_cnt = int(self.config.get("persistence_min_count", 2))
+                if count >= min_cnt:
+                    persistence_bonus = float(self.config.get("persistence_bonus", 4.0))
+                    details["信号持久性"] = f"✓ 连续{count}次出现 +{persistence_bonus:.0f}"
+            else:
+                self._persist_counts[key] = 1
+            self._signal_history[key] = (self._scan_counter, score)
+            score = _clamp(score + persistence_bonus, 0, 100)
 
         if score < self.config["min_score"]: return fail(f"评分不足({score:.1f})")
 
         dir_cn = "多头" if d1_dir == "bull" else "空头"
+        # 信号摘要（v1.6 增强）
+        sig_lines = [
+            f"{dir_cn} {score:.1f}分 [{market_state}]",
+            f"D1布林{'上' if d1_dir=='bull' else '下'}轨→H4共振→1H回踩→15m起爆",
+        ]
+        if fib_det:        sig_lines.append(f"📐 {fib_det}")
+        if vwap_det:       sig_lines.append(f"🏦 {vwap_det}")
+        if vp_det:         sig_lines.append(f"📊 {vp_det}")
+        if z_label:        sig_lines.append(f"⚡ z-score {z_label}")
+        if consec_det:     sig_lines.append(f"🕯 {consec_det}")
+        if persistence_bonus > 0:
+            sig_lines.append(f"🔄 信号稳定+{persistence_bonus:.0f}")
+        # P3-1 动态止损止盈
+        sig_lines.append(
+            f"🛑 动态止损-{risk_cfg['dynamic_stop_loss_pct']:.2f}% / "
+            f"🎯 止盈+{risk_cfg['dynamic_take_profit_pct']:.2f}% "
+            f"({risk_cfg['dynamic_tp_source']}, RR={risk_cfg['dynamic_rr_ratio']:.2f})"
+        )
+        sig_lines.append(f"💰 建议仓位 {risk_cfg['position_pct']:.2f}%")
+
         return {
             "symbol": inst_id, "passed": True, "score": round(score, 2),
             "opportunity_score": round(score, 2),
             "direction": "BUY" if d1_dir == "bull" else "SELL",
             "category": "小月期货布林趋势转折",
-            "signals": [f"{dir_cn} {score:.1f}分",
-                        f"D1布林{'上' if d1_dir=='bull' else '下'}轨→H4共振→1H回踩→15m起爆"],
+            "signals": sig_lines,
             "last_price": lp,
             "volume_24h": float(getattr(symbol, "volume_24h", 0) or 0),
             "details": details,
+            # P3-4: 全部 risk_cfg 字段透出（含 dynamic_*、trail_*、position_pct）
             "stop_loss_pct": risk_cfg["stop_loss_pct"],
             "take_profit_pct": risk_cfg["take_profit_pct"],
+            "dynamic_stop_loss_pct": risk_cfg["dynamic_stop_loss_pct"],
+            "dynamic_take_profit_pct": risk_cfg["dynamic_take_profit_pct"],
+            "dynamic_rr_ratio": risk_cfg["dynamic_rr_ratio"],
+            "trail_activate_pct": risk_cfg["trail_activate_pct"],
+            "trail_distance_pct": risk_cfg["trail_distance_pct"],
+            "position_pct": risk_cfg["position_pct"],
+            "market_state": market_state,
             "ranking_factors": {
                 "trend": d1_sc, "trigger": m15_sc, "volume": m15_sc * 0.8,
                 "location": h1_sc, "freshness": 50,
@@ -429,10 +861,13 @@ class XiaoYueBollMacdScanner(BaseScannerStrategy if _HAS_BASE else object):
         """
         检测 H4 周期与 D1 方向是否共振。
         返回 (score_delta, detail_str)：正值=加分，负值=惩罚。
-        H4 数据不足时静默跳过（不影响主逻辑）。
+        v1.6 改进：优先使用 v2 多维度评分（方向 40%+斜率强度 30%+MACD 柱强度 30%）。
         """
         if not bool(self.config.get("h4_resonance_enabled", True)):
             return 0.0, ""
+        # P2-1: H4 共振 v2 多维度评分（替代二值方向判定）
+        if bool(self.config.get("h4_resonance_v2_enabled", True)):
+            return self._h4_resonance_v2(h4, direction)
         bonus   = float(self.config.get("h4_resonance_bonus",  12.0))
         penalty = float(self.config.get("h4_diverge_penalty",  15.0))
         if h4 is None or len(h4) < 30:
@@ -476,6 +911,72 @@ class XiaoYueBollMacdScanner(BaseScannerStrategy if _HAS_BASE else object):
         except Exception:
             return 0.0, "H4共振计算异常"
 
+    # ── P2-1: H4 共振 v2 多维度评分 ────────────────────────────────────────
+    def _h4_resonance_v2(self, h4: pd.DataFrame, direction: str) -> Tuple[float, str]:
+        """
+        H4 共振 v2：方向 40% + 斜率强度 30% + MACD 柱强度 30%，归一化到 [0,1]。
+        v2 score < hard_floor (0.20) 且开启 hard_filter → 返回硬拒标记（外层判断）。
+        加分映射：以 0.5 为零点的线性函数 [-max, +max]。
+        """
+        max_b = float(self.config.get("h4_resonance_v2_max", 12.0))
+        if h4 is None or len(h4) < 30:
+            return 0.0, "H4数据不足，跳过共振v2"
+        try:
+            period = int(self.config["boll_period"])
+            std_m  = float(self.config["boll_std_mult"])
+            b4 = _bollinger(h4, period, std_m)
+            last4 = b4.iloc[-1]
+            mid4  = float(last4["boll_mid"])
+            c4    = float(last4["c"])
+            slope_deg = _slope_angle(b4["boll_mid"], int(self.config["slope_lookback"]))
+            # MACD
+            mf = int(self.config["m15_macd_fast"])
+            ms = int(self.config["m15_macd_slow"])
+            msig = int(self.config["m15_macd_signal"])
+            ef4 = h4["c"].ewm(span=mf, adjust=False).mean()
+            es4 = h4["c"].ewm(span=ms, adjust=False).mean()
+            ml4 = ef4 - es4
+            msl4 = ml4.ewm(span=msig, adjust=False).mean()
+            hist4 = float((ml4 - msl4).iloc[-1])
+
+            # 1) 方向分（0/1）
+            if direction == "bull":
+                dir_match = c4 > mid4
+            else:
+                dir_match = c4 < mid4
+            dir_sub = 1.0 if dir_match else 0.0
+
+            # 2) 斜率强度分（0~1，归一化到 0.6° = 满分）
+            slope_aligned = (direction == "bull" and slope_deg > 0) or \
+                            (direction == "bear" and slope_deg < 0)
+            slope_intensity = _clamp(abs(slope_deg) / 0.6, 0.0, 1.0)
+            slope_sub = (0.5 if slope_aligned else 0.0) + 0.5 * slope_intensity
+            slope_sub = _clamp(slope_sub, 0.0, 1.0)
+
+            # 3) MACD 柱方向 + 强度（0~1，归一化到价格 0.3% = 满分强度）
+            hist_aligned = (direction == "bull" and hist4 > 0) or \
+                           (direction == "bear" and hist4 < 0)
+            hist_intensity = _clamp(abs(hist4) / max(c4 * 0.003, 1e-9), 0.0, 1.0)
+            macd_sub = (0.5 if hist_aligned else 0.0) + 0.5 * hist_intensity
+            macd_sub = _clamp(macd_sub, 0.0, 1.0)
+
+            # 综合：方向 40% + 斜率 30% + MACD 30%
+            v2_score = dir_sub * 0.40 + slope_sub * 0.30 + macd_sub * 0.30
+            self._last_h4_v2_score = v2_score   # 用于 P3-1 等下游使用
+
+            # 硬拒（仅当 hard_filter_enabled 同时 v2 < hard_floor）
+            hard_floor = float(self.config.get("h4_resonance_v2_hard_floor", 0.20))
+            if (bool(self.config.get("h4_hard_filter_enabled", True))
+                    and v2_score < hard_floor):
+                # 通过返回极大负值让上层硬拒
+                return -999.0, f"H4共振v2={v2_score:.2f}<{hard_floor:.2f} 严重逆向"
+
+            # 加分映射：以 0.5 为零点的线性函数 [-max, +max]
+            adj = round((v2_score - 0.5) * 2.0 * max_b, 2)
+            return adj, f"H4共振v2={v2_score:.2f}(方向{dir_sub:.0f}/斜率{slope_sub:.2f}/MACD{macd_sub:.2f})"
+        except Exception:
+            return 0.0, "H4共振v2计算异常"
+
     # ── 改进三：K 线形态质量评分 ─────────────────────────────────────────────
     def _score_candle_quality(self, df: pd.DataFrame, direction: str) -> Tuple[float, str]:
         """
@@ -499,22 +1000,27 @@ class XiaoYueBollMacdScanner(BaseScannerStrategy if _HAS_BASE else object):
             if direction == "bull":
                 # 多头：大实体阳线 + 下影（买盘）+ 无长上影（无抛压）
                 quality = body_ratio * 40 + lower_wick * 20 - upper_wick * 15
-                # 锤子线：下影 >= 2×实体，上影短
-                hammer = lower_wick >= 2 * body_ratio and upper_wick < 0.1
-                # 吞没阳线：收盘 > 前根开盘，开盘 < 前根收盘
+                # 锤子线：下影 >= 2×实体，上影短，今根必须收阳
+                hammer = lower_wick >= 2 * body_ratio and upper_wick < 0.1 and c >= o
+                # P0-X1 修复：吞没阳线必须满足
+                #   ① 今根阳线 (c > o)
+                #   ② 前根阴线 (pc < po)
+                #   ③ 今根实体完全包住前根实体 (c > po AND o < pc)
+                # 原代码缺 ① 会把十字星/弱反弹误判为吞没
                 po = float(prev.get("o", prev.get("open", 0)))
                 pc = float(prev.get("c", prev.get("close", 0)))
-                engulf = c > po and o < pc and pc < po   # 前根阴线被今根吞没
+                engulf = (c > o) and (pc < po) and (c > po) and (o < pc)
                 tag = ("锤子线✓" if hammer else "") + ("吞没✓" if engulf else "")
                 if hammer:  quality += 15
                 if engulf:  quality += 20
             else:  # bear
                 quality = body_ratio * 40 + upper_wick * 20 - lower_wick * 15
-                # 射击之星：上影 >= 2×实体，下影短
-                shooting = upper_wick >= 2 * body_ratio and lower_wick < 0.1
+                # 射击之星：上影 >= 2×实体，下影短，今根必须收阴
+                shooting = upper_wick >= 2 * body_ratio and lower_wick < 0.1 and c <= o
                 po = float(prev.get("o", prev.get("open", 0)))
                 pc = float(prev.get("c", prev.get("close", 0)))
-                engulf = c < po and o > pc and pc > po
+                # P0-X1 修复：吞没阴线必须 ① 今根阴线 ② 前根阳线 ③ 实体包住
+                engulf = (c < o) and (pc > po) and (c < po) and (o > pc)
                 tag = ("射击之星✓" if shooting else "") + ("吞没✓" if engulf else "")
                 if shooting: quality += 15
                 if engulf:   quality += 20
@@ -525,29 +1031,33 @@ class XiaoYueBollMacdScanner(BaseScannerStrategy if _HAS_BASE else object):
         except Exception:
             return 0.0, ""
 
-    # ── 改进四：RSI 动量背离检测 ─────────────────────────────────────────────
+    # ── 改进四：RSI 动量背离检测（P0-X2: O(n²) → O(n)）──────────────────────
     def _check_rsi_divergence(self, df: pd.DataFrame, direction: str) -> Tuple[float, str]:
         """
         检测价格与 RSI 的顶/底背离。
         返回 (penalty, detail)。无背离时返回 (0, "")。
+        P0-X2 修复：原实现每次循环都重算整段 RSI（O(n²)），20 根窗口要算 20 次 RSI。
+                    改为一次性 EMA 算完，复杂度降到 O(n)。
         """
         penalty = float(self.config.get("rsi_diverge_penalty", 20.0))
         try:
             if len(df) < 20:
                 return 0.0, ""
             rsi_period = int(self.config.get("h1_rsi_period", 14))
-            # 计算整段 RSI
             closes = df["c"]
-            # 用最近20根判断
-            window = min(20, len(closes))
-            rsi_all = []
-            for i in range(window):
-                idx = len(closes) - window + i
-                r = _rsi_wilder(closes.iloc[:idx + 1], rsi_period)
-                rsi_all.append(r)
-            prices = [float(closes.iloc[len(closes) - window + i]) for i in range(window)]
+            # P0-X2: 一次性 Wilder RSI 序列（用 ewm alpha=1/period 等价于 Wilder 平滑）
+            deltas  = closes.diff()
+            gains   = deltas.where(deltas > 0, 0.0)
+            losses  = (-deltas).where(deltas < 0, 0.0)
+            avg_g   = gains.ewm(alpha=1.0 / rsi_period, adjust=False).mean()
+            avg_l   = losses.ewm(alpha=1.0 / rsi_period, adjust=False).mean()
+            rs      = avg_g / avg_l.replace(0, 1e-9)
+            rsi_full = (100.0 - 100.0 / (1.0 + rs)).fillna(50.0)
+            window  = min(20, len(closes))
+            rsi_all = rsi_full.iloc[-window:].tolist()
+            prices  = closes.iloc[-window:].tolist()
 
-            # 比较最近3根与前面的极值
+            # 比较最近 5 根与前 10 根的极值
             recent_price_max = max(prices[-5:])
             prior_price_max  = max(prices[-15:-5])
             recent_rsi_max   = max(rsi_all[-5:])
@@ -558,11 +1068,11 @@ class XiaoYueBollMacdScanner(BaseScannerStrategy if _HAS_BASE else object):
             prior_rsi_min    = min(rsi_all[-15:-5])
 
             if direction == "bull":
-                # 顶背离：价格新高但 RSI 未新高
+                # 顶背离：价格新高但 RSI 未新高（多头警示反转）
                 if recent_price_max > prior_price_max * 1.005 and recent_rsi_max < prior_rsi_max - 3:
                     return penalty, f"顶背离⚠ 价格↑{(recent_price_max/prior_price_max-1)*100:.1f}% RSI↓{prior_rsi_max-recent_rsi_max:.1f}"
             else:  # bear
-                # 底背离：价格新低但 RSI 未新低（做空时警惕底背离=反转）
+                # 底背离：价格新低但 RSI 未新低（空头警示反转）
                 if recent_price_min < prior_price_min * 0.995 and recent_rsi_min > prior_rsi_min + 3:
                     return penalty, f"底背离⚠ 价格↓ RSI↑{recent_rsi_min-prior_rsi_min:.1f}"
             return 0.0, ""
@@ -613,10 +1123,13 @@ class XiaoYueBollMacdScanner(BaseScannerStrategy if _HAS_BASE else object):
 
         # 评分
         score = _clamp(abs(mid_slope) / max(eff_min_angle * 4, 0.5), 0, 1) * 50
+        # P0-X3 修复：原 range(min(sl_lb, len(b)-1))，当 sl_lb=8 且 len(b)=8 时 i=0 → 索引 -8 越界
+        # 改为 sl_lb-1 上限确保 -(sl_lb-i) 永远在 [-(sl_lb-1), -1] 内
+        recent_check_n = min(sl_lb - 1, len(b) - 1)
         recent_ok = all((float(b["c"].iloc[-(sl_lb-i)]) > float(b["boll_mid"].iloc[-(sl_lb-i)]))
                         if direction == "bull" else
                         (float(b["c"].iloc[-(sl_lb-i)]) < float(b["boll_mid"].iloc[-(sl_lb-i)]))
-                        for i in range(min(sl_lb, len(b)-1)))
+                        for i in range(recent_check_n)) if recent_check_n > 0 else False
         if recent_ok: score += 15
         if squeeze: score += self.config["bbw_squeeze_bonus"]
         if slope_accel: score += accel_bonus
@@ -625,6 +1138,8 @@ class XiaoYueBollMacdScanner(BaseScannerStrategy if _HAS_BASE else object):
                   f" ADX={adx:.1f}"
                   f"{' 收缩' if squeeze else ''}"
                   f" {'持续' if recent_ok else ''}")
+        # P1-5: 把 ADX/斜率/ATR 缓存到 self 用于市场状态自适应
+        self._last_d1_metrics = {"adx": float(adx), "slope_deg": float(mid_slope), "atr_pct": float(atr_pct)}
         return True, direction, min(100, score), detail, atr_pct
 
     def _step2_h1_pullback(self, df: pd.DataFrame, direction: str) -> Tuple[bool, float, str, float]:
@@ -802,12 +1317,15 @@ class XiaoYueBollMacdScanner(BaseScannerStrategy if _HAS_BASE else object):
         if req_volume and not vol_ok:
             return False, 0, f"15m未放量(cv={cv:.0f} < {vr:.2f}×{bv:.0f})"
 
-        # 改进G：MACD 柱体连续强化（level 3 交叉时强制要求，level 2 时降级为扣分）
+        # 改进G：MACD 柱体连续强化（level 3 交叉时强制要求，level 2 时扣分但不降级）
+        # P1-4: 原代码 trig_level=2 时降级到 1（22→14分，损失 8 分）。改为扣固定分但保留 level，影响更精准。
+        consec_penalty_pending = 0.0
         if not hist_consec_ok:
             if trig_level == 3:
                 return False, 0, "15m MACD柱体方向未连续(假叉过滤)"
             elif trig_level == 2:
-                trig_level = 1  # 降级为低触发
+                consec_penalty_pending = float(self.config.get("trig_consec_fail_penalty", 5.0))
+                trig_note += " 柱体未连续-{:.0f}".format(consec_penalty_pending)
 
         # ── 改进二：15m BB 挤压扩张检测 ─────────────────────────────────────
         bbw_lb = int(self.config.get("m15_bbw_squeeze_lookback", 10))
@@ -842,6 +1360,10 @@ class XiaoYueBollMacdScanner(BaseScannerStrategy if _HAS_BASE else object):
         if bb_overextended:
             score -= overextend_pen
 
+        # P1-4: 应用柱体未连续扣分（保留 trig_level）
+        if consec_penalty_pending > 0:
+            score -= consec_penalty_pending
+
         bb_note = ("挤压扩张✓" if (bb_squeeze and bb_expanding) else
                    ("过度扩张⚠" if bb_overextended else
                     ("扩张中" if bb_expanding else ("挤压中" if bb_squeeze else ""))))
@@ -853,16 +1375,32 @@ class XiaoYueBollMacdScanner(BaseScannerStrategy if _HAS_BASE else object):
             + (f" BB{bb_note}" if bb_note else "")
         )
 
-    def _apply_risk(self, score, inst_id, ed, direction, atr_pct, lp, bd, hd, md):
-        d = {"大周期": bd, "1H回踩": hd, "15m起爆": md, "ATR%": f"{atr_pct:.1f}%"}
+    def _apply_risk(self, score, inst_id, ed, direction, atr_pct, lp, bd, hd, md,
+                    swing_info: Optional[Dict[str, float]] = None,
+                    h1: Optional[pd.DataFrame] = None,
+                    market_state: str = "neutral"):
+        d = {"大周期": bd, "1H回踩": hd, "15m起爆": md, "ATR%": f"{atr_pct:.1f}%",
+             "市场状态": market_state}
         f_ = float(ed.get("funding_rate", 0) or 0); ep = self.config["funding_extreme_pct"] / 100.0
         if abs(f_) > ep and ((f_ > ep and direction == "bull") or (f_ < -ep and direction == "bear")):
             score -= self.config["funding_penalty"]; d["资金费率"] = f"⚠ 拥挤({f_*100:.2f}%)"
+
+        # P3-7: BTC 环境阈值 ATR 自适应
         bc = float(ed.get("btc_1h_pct", ed.get("btc_context", {}).get("btc_1h_pct", 0)) or 0) if isinstance(ed, dict) else 0
-        if bc < self.config["btc_dump_threshold_pct"] and direction == "bull":
-            score -= self.config["btc_dump_penalty"]; d["BTC环境"] = f"⚠ BTC跌{bc:.1f}%"
-        if bc > float(self.config.get("btc_pump_threshold_pct", 3.0)) and direction == "bear":
-            score -= self.config["btc_dump_penalty"]; d["BTC环境"] = f"⚠ BTC涨{bc:.1f}%"
+        btc_atr = float(ed.get("btc_atr_pct", 0) or 0) if isinstance(ed, dict) else 0
+        if bool(self.config.get("btc_env_atr_adaptive", True)) and btc_atr > 0:
+            atr_mult = float(self.config.get("btc_env_atr_mult", 1.0))
+            dump_thr = -btc_atr * atr_mult
+            pump_thr = btc_atr * atr_mult
+        else:
+            dump_thr = self.config["btc_dump_threshold_pct"]
+            pump_thr = float(self.config.get("btc_pump_threshold_pct", 3.0))
+        if bc < dump_thr and direction == "bull":
+            score -= self.config["btc_dump_penalty"]; d["BTC环境"] = f"⚠ BTC跌{bc:.1f}%(阈值{dump_thr:.1f}%)"
+        if bc > pump_thr and direction == "bear":
+            score -= self.config["btc_dump_penalty"]; d["BTC环境"] = f"⚠ BTC涨{bc:.1f}%(阈值{pump_thr:.1f}%)"
+
+        # ── ATR 基础止损止盈（兼容保留） ──
         sm = self.config["stop_atr_mult"]; tm = self.config["take_profit_atr_mult"]
         raw_sp = atr_pct * sm
         sp = _clamp(
@@ -873,13 +1411,84 @@ class XiaoYueBollMacdScanner(BaseScannerStrategy if _HAS_BASE else object):
         sl = lp * (1 - sp / 100) if direction == "bull" else lp * (1 + sp / 100)
         tp_pct = sp * tm / max(sm, 1e-9)
         tp = lp * (1 + tp_pct / 100) if direction == "bull" else lp * (1 - tp_pct / 100)
-        d["ATR止损"] = f"{sl:.6g}(ATR{sm}×={raw_sp:.1f}%→钳制{sp:.1f}%)"
-        d["ATR止盈"] = f"{tp:.6g}(盈亏比{tm/sm:.1f})"
+        # P0-X5: 仅当真实发生钳制时才标注"钳制"，避免误导
+        sp_clamped = abs(raw_sp - sp) > 1e-6
+        d["ATR止损"] = (
+            f"{sl:.6g}(ATR{sm}×={raw_sp:.2f}%"
+            + (f"→钳制{sp:.2f}%" if sp_clamped else "")
+            + ")"
+        )
+        d["ATR止盈"] = f"{tp:.6g}(盈亏比{tm/max(sm,1e-9):.2f})"
+
+        # ── P3-1: 动态止损止盈（联动 swing/Fib/BB） ──
+        dyn_sl_pct = sp; dyn_tp_pct = tp_pct; dyn_rr = tm / max(sm, 1e-9); dyn_tp_src = "ATR"
+        if bool(self.config.get("dynamic_sl_tp_enabled", True)) and h1 is not None and len(h1) >= 5:
+            try:
+                h1_atr_v = float(_atr(h1, 14))
+                period = int(self.config.get("boll_period", 20))
+                std_m  = float(self.config.get("boll_std_mult", 2.0))
+                h1_b   = _bollinger(h1, period, std_m)
+                bb_up  = float(h1_b["boll_up"].iloc[-1])
+                bb_dn  = float(h1_b["boll_down"].iloc[-1])
+                swing_high = float(swing_info.get("swing_high", 0)) if swing_info else 0.0
+                swing_low  = float(swing_info.get("swing_low",  0)) if swing_info else 0.0
+                if direction == "bull":
+                    # 止损候选（多头）
+                    sl_atr   = lp - h1_atr_v * 1.5
+                    sl_swing = (swing_low - h1_atr_v * 0.3) if swing_low > 0 else 0.0
+                    sl_dyn   = max(sl_atr, sl_swing) if sl_swing > 0 else sl_atr
+                    sl_dyn   = min(sl_dyn, lp * 0.998)             # 不能高于当前价
+                    # 止盈候选（多头）
+                    tp_cands = []
+                    if bb_up > lp:                  tp_cands.append(("BB上轨", bb_up))
+                    if swing_high > lp:             tp_cands.append(("swing_high", swing_high - h1_atr_v * 0.2))
+                    tp_cands.append(("ATR×3", lp + h1_atr_v * 3.0))
+                    tp_dyn_src, tp_dyn = min(tp_cands, key=lambda x: x[1])
+                    risk   = lp - sl_dyn
+                    reward = tp_dyn - lp
+                else:
+                    sl_atr   = lp + h1_atr_v * 1.5
+                    sl_swing = (swing_high + h1_atr_v * 0.3) if swing_high > 0 else 0.0
+                    sl_dyn   = min(sl_atr, sl_swing) if sl_swing > 0 else sl_atr
+                    sl_dyn   = max(sl_dyn, lp * 1.002)
+                    tp_cands = []
+                    if bb_dn < lp:                  tp_cands.append(("BB下轨", bb_dn))
+                    if 0 < swing_low < lp:          tp_cands.append(("swing_low", swing_low + h1_atr_v * 0.2))
+                    tp_cands.append(("ATR×3", lp - h1_atr_v * 3.0))
+                    tp_dyn_src, tp_dyn = max(tp_cands, key=lambda x: x[1])
+                    risk   = sl_dyn - lp
+                    reward = lp - tp_dyn
+                if risk > 0 and reward > 0:
+                    dyn_sl_pct = abs(lp - sl_dyn) / lp * 100
+                    dyn_tp_pct = abs(tp_dyn - lp) / lp * 100
+                    dyn_rr     = reward / risk
+                    dyn_tp_src = tp_dyn_src
+                    d["动态止损"] = f"{sl_dyn:.6g} (-{dyn_sl_pct:.2f}%)"
+                    d["动态止盈"] = f"{tp_dyn:.6g} (+{dyn_tp_pct:.2f}%, 来源={tp_dyn_src})"
+                    d["动态盈亏比"] = f"{dyn_rr:.2f}"
+                    # P3-2: 盈亏比过低软扣分
+                    min_rr = float(self.config.get("min_rr_ratio", 1.5))
+                    if 0 < dyn_rr < min_rr:
+                        rr_pen = float(self.config.get("rr_too_low_penalty", 6.0))
+                        score = max(0.0, score - rr_pen * (1.0 - dyn_rr / min_rr))
+                        d["盈亏比警告"] = f"⚠ {dyn_rr:.2f}<{min_rr:.2f} 扣分"
+            except Exception:
+                pass
+
+        # ── P3-4: 追踪止损输出字段（不只是文本） ──
         ta = atr_pct * self.config["trail_activate_atr_mult"]
         td_ = atr_pct * self.config["trail_distance_atr_mult"]
         d["追踪止损"] = f"浮盈>{ta:.1f}%激活 距离{td_:.1f}%"
+        # ── P4-3: 仓位建议（数字字段 + 文本两种） ──
         bs = self.config["position_size"]; sc_ = min(1.0, 3.0 / max(atr_pct, 1.0))
-        d["建议仓位"] = f"{min(bs * sc_, 0.10)*100:.1f}%"
+        # P4-3: 信号置信度 × 波动率自适应（替代纯 base_size 缩放）
+        confidence = _clamp(score / 100.0, 0.0, 1.0)
+        # 风险公式：position_pct = base_risk(1%) × confidence / sl_pct
+        base_risk = 0.01
+        sl_pct_use = max(dyn_sl_pct, 0.5)   # 至少 0.5% 止损（防爆仓）
+        position_advice = _clamp(base_risk * confidence / (sl_pct_use / 100.0) * 100, 0.0, 20.0)
+        position_advice = round(min(position_advice, bs * sc_ * 100, 10.0), 2)
+        d["建议仓位"] = f"{position_advice:.2f}%"
         # ── 改进五：OI 持仓量同向确认 ────────────────────────────────────────
         if bool(self.config.get("oi_confirm_enabled", True)):
             oi_chg = float(ed.get("oi_change_pct", 0) or 0)
@@ -894,33 +1503,83 @@ class XiaoYueBollMacdScanner(BaseScannerStrategy if _HAS_BASE else object):
                     score -= oi_pen
                     d["OI警告"] = f"OI{oi_chg:+.1f}% 背离⚠"
         risk_cfg = {
-            "stop_loss_pct": round(float(sp), 4),
-            "take_profit_pct": round(float(tp_pct), 4),
+            "stop_loss_pct":      round(float(sp), 4),
+            "take_profit_pct":    round(float(tp_pct), 4),
+            # P3-1: 动态止损止盈
+            "dynamic_stop_loss_pct":   round(float(dyn_sl_pct), 4),
+            "dynamic_take_profit_pct": round(float(dyn_tp_pct), 4),
+            "dynamic_rr_ratio":   round(float(dyn_rr), 4),
+            "dynamic_tp_source":  dyn_tp_src,
+            # P3-4: 追踪止损字段化
+            "trail_activate_pct": round(float(ta), 4),
+            "trail_distance_pct": round(float(td_), 4),
+            # P4-3: 仓位建议
+            "position_pct":       round(float(position_advice), 4),
         }
         return round(max(0, score), 2), d, risk_cfg
 
     def scan_all_symbols(self, symbols):
+        # P3-3: ThreadPoolExecutor 并行扫描（max 8 线程）
+        from concurrent.futures import ThreadPoolExecutor, as_completed
         res = []
         fail_stats: Dict[str, int] = {}
-        for s in symbols:
-            try:
-                r = self.scan_symbol(s)
+        # P3-6: 失败原因结构化分类
+        step_stats = {"D1": 0, "H4": 0, "H1": 0, "15m": 0, "评分不足": 0, "数据不足": 0, "异常": 0}
+
+        def _classify_fail(reason: str) -> str:
+            r = str(reason)
+            if "数据不足" in r or "缺少最新价" in r:  return "数据不足"
+            if r.startswith("D1") or r.startswith("4H"):  return "D1"
+            if "H4" in r:                              return "H4"
+            if r.startswith("1H") or "H1" in r:        return "H1"
+            if r.startswith("15m"):                    return "15m"
+            if "评分不足" in r:                         return "评分不足"
+            return "异常"
+
+        max_workers = min(8, max(1, len(symbols)))
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {executor.submit(self._safe_scan, s): s for s in symbols}
+            for future in as_completed(futures):
+                try:
+                    r = future.result(timeout=15)
+                except Exception as e:
+                    fail_stats[f"[future异常]{type(e).__name__}"] = fail_stats.get(f"[future异常]{type(e).__name__}", 0) + 1
+                    step_stats["异常"] += 1
+                    continue
+                if r is None:
+                    step_stats["异常"] += 1
+                    continue
                 if r.get("passed"):
                     res.append(r)
                 else:
                     reason = str(r.get("details", {}).get("状态", "unknown"))
-                    # 取前缀作为分类键，避免日志爆炸
                     key = reason[:30]
                     fail_stats[key] = fail_stats.get(key, 0) + 1
-            except Exception as e:
-                print(f"[小月布林] {getattr(s,'inst_id','')} 扫描异常: {e}")
-                fail_stats["exception"] = fail_stats.get("exception", 0) + 1
-                continue
+                    step_stats[_classify_fail(reason)] += 1
+
         res.sort(key=lambda r: float(r.get("score", 0) or 0), reverse=True)
-        # 汇总失败原因，方便诊断
         top = sorted(fail_stats.items(), key=lambda x: x[1], reverse=True)[:15]
-        print(f"[小月布林诊断] 通过{len(res)}/{len(symbols)} 失败分布: { {k:v for k,v in top} }")
-        return {"type": "xiaoyue", "all_opportunities": res[:int(self.config.get("top_n", 12))], "scanned_symbols": len(symbols)}
+        print(f"[小月布林诊断] 通过{len(res)}/{len(symbols)} 步骤分布:{step_stats}")
+        print(f"[小月布林诊断] 失败TOP15: { {k:v for k,v in top} }")
+        return {
+            "type": "xiaoyue",
+            "all_opportunities": res[:int(self.config.get("top_n", 12))],
+            "scanned_symbols": len(symbols),
+            "diagnostics": {
+                "step_stats": step_stats,
+                "fail_top15": {k: v for k, v in top},
+                "pass_rate_pct": round(len(res) / max(len(symbols), 1) * 100, 1),
+            },
+        }
+
+    def _safe_scan(self, sym):
+        """单个符号扫描 + 异常保护"""
+        try:
+            return self.scan_symbol(sym)
+        except Exception as exc:
+            inst_id = getattr(sym, 'inst_id', '')
+            print(f"[小月布林] {inst_id} 扫描异常: {exc}")
+            return {"passed": False, "details": {"状态": f"[异常]{type(exc).__name__}"}}
 
     def generate_signal(self, data, *a, **kw):
         km = data.get("klines_map", {}) or {}
@@ -932,8 +1591,8 @@ class XiaoYueBollMacdScanner(BaseScannerStrategy if _HAS_BASE else object):
                 if isinstance(v, (pd.DataFrame, list, tuple)) and len(v) > cap:
                     if isinstance(v, pd.DataFrame):
                         km[k] = v.tail(cap)
-                    elif isinstance(v, list):
-                        km[k] = v[-cap:]
+                    elif isinstance(v, (list, tuple)):    # P0-X4: tuple 一并支持
+                        km[k] = list(v)[-cap:]
 
         class S: pass
         s = S(); s.inst_id = str(data.get("inst_id", data.get("symbol", "BT")))
