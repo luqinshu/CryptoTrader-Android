@@ -47,6 +47,7 @@ jobs:
 
     - name: Pre-accept Android SDK licenses
       run: |
+        rm -rf "$HOME/.buildozer/android/platform/android-sdk"
         SDK_LICENSES="$HOME/.buildozer/android/platform/android-sdk/licenses"
         mkdir -p "$SDK_LICENSES"
         echo -e "\n24333f8a63b6825ea9c5514f83c2829b004d1fee" > "$SDK_LICENSES/android-sdk-license"
