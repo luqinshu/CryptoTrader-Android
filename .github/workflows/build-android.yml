@@ -152,27 +152,25 @@ jobs:
       working-directory: android
       run: |
         TAG="build-log-run-${{ github.run_number }}"
-        BODY="Commit: ${{ github.sha }}\nStatus: ${{ job.status }}"
+        echo "Creating release $TAG ..."
         
-        # Dump error summary into body
-        if [ -f buildozer_output.txt ]; then
-          ERR_TAIL=$(grep -i "error\|exception\|traceback\|FAILED\|fatal" buildozer_output.txt | tail -5 || true)
-          [ -n "$ERR_TAIL" ] && BODY="$BODY\n\nErrors:\n$ERR_TAIL"
-        fi
-        
-        # Use GitHub CLI (gh) which handles auth automatically
-        gh release delete "$TAG" --yes 2>/dev/null || true
-        git tag -f "$TAG" 2>/dev/null || true
-        git push -f origin "$TAG" 2>/dev/null || true
-        sleep 2
+        # Create tag and release using gh CLI (pre-installed on runner)
+        git tag -f "$TAG" 2>/dev/null
+        git push -f origin "$TAG" 2>&1 || echo "git push failed (continuing)"
         
         if [ -f buildozer_output.txt ]; then
-          echo "$BODY" | gh release create "$TAG" buildozer_output.txt --title "Build #${{ github.run_number }}" --notes-file - 2>/dev/null || true
+          gh release create "$TAG" buildozer_output.txt \
+            --title "Build #${{ github.run_number }}" \
+            --notes "Commit: ${{ github.sha }} - Status: ${{ job.status }}" \
+            --repo "${{ github.repository }}" 2>&1 || echo "gh release create failed"
         else
-          echo "$BODY" | gh release create "$TAG" --title "Build #${{ github.run_number }}" --notes-file - 2>/dev/null || true
+          gh release create "$TAG" \
+            --title "Build #${{ github.run_number }}" \
+            --notes "Commit: ${{ github.sha }} - Status: ${{ job.status }} - No output file" \
+            --repo "${{ github.repository }}" 2>&1 || echo "gh release create failed"
         fi
       env:
-        GH_TOKEN: ${{ github.token }}
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
     - name: Upload build logs
       if: always()
