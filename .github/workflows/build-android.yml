@@ -72,6 +72,7 @@ jobs:
         for recipe in hostpython3 python3; do
           RECIPE="$P4A_PKG/recipes/$recipe/__init__.py"
           if [ -f "$RECIPE" ]; then
+            sed -i "s/version\s*=\s*'[^']*'/version = \"3.11.5\"/" "$RECIPE"
             sed -i 's/version\s*=\s*"[^"]*"/version = "3.11.5"/' "$RECIPE"
             echo "PATCHED pip p4a $recipe: $(grep 'version\s*=' "$RECIPE")"
           fi
@@ -81,6 +82,7 @@ jobs:
         if [ -d "$CLONED" ]; then
           for recipe in hostpython3 python3; do
             RECIPE="$CLONED/pythonforandroid/recipes/$recipe/__init__.py"
+            [ -f "$RECIPE" ] && sed -i "s/version\s*=\s*'[^']*'/version = \"3.11.5\"/" "$RECIPE"
             [ -f "$RECIPE" ] && sed -i 's/version\s*=\s*"[^"]*"/version = "3.11.5"/' "$RECIPE"
           done
         fi
