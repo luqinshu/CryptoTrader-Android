@@ -68,21 +68,20 @@ jobs:
       run: |
         P4A_DIR="../python-for-android-pinned"
         rm -rf "$P4A_DIR"
-        git clone --depth=1 https://github.com/kivy/python-for-android.git "$P4A_DIR"
-        # Patch hostpython3 recipe to use Python 3.11.5 instead of 3.14
+        # Clone develop branch which still uses Python 3.11
+        git clone --depth=1 --branch develop https://github.com/kivy/python-for-android.git "$P4A_DIR"
+        # If develop also uses 3.14, revert hostpython3 recipe
         HOSTPY="$P4A_DIR/pythonforandroid/recipes/hostpython3/__init__.py"
-        if [ -f "$HOSTPY" ]; then
-          sed -i 's/"3\.14\.[0-9]*"/"3.11.5"/' "$HOSTPY"
-          sed -i 's|v3\.14\.[0-9]*\.tar\.gz|v3.11.5.tar.gz|' "$HOSTPY"
+        if grep -q "3.14" "$HOSTPY" 2>/dev/null; then
+          sed -i 's/version\s*=\s*"[^"]*"/version = "3.11.5"/' "$HOSTPY"
+          sed -i 's|v[0-9]\+\.[0-9]\+\.[0-9]\+\.tar\.gz|v3.11.5.tar.gz|' "$HOSTPY"
         fi
         PY3="$P4A_DIR/pythonforandroid/recipes/python3/__init__.py"
-        if [ -f "$PY3" ]; then
-          sed -i 's/"3\.14\.[0-9]*"/"3.11.5"/' "$PY3"
-          sed -i 's|v3\.14\.[0-9]*\.tar\.gz|v3.11.5.tar.gz|' "$PY3"
+        if [ -f "$PY3" ] && grep -q "3.14" "$PY3" 2>/dev/null; then
+          sed -i 's/version\s*=\s*"[^"]*"/version = "3.11.5"/' "$PY3"
+          sed -i 's|v[0-9]\+\.[0-9]\+\.[0-9]\+\.tar\.gz|v3.11.5.tar.gz|' "$PY3"
         fi
-        # Prevent p4a from overwriting our patched recipes
-        find "$P4A_DIR" -name "*.py" -exec touch -t 209901010000 {} +
-        echo "Patched p4a to use Python 3.11.5"
+        echo "p4a Python version: $(grep 'version\s*=' "$HOSTPY" | head -1)"
 
     - name: Build APK
       working-directory: android
