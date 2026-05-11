@@ -64,29 +64,26 @@ jobs:
         echo "SDK ready, sdkmanager: $(ls -la "$SDK_ROOT/tools/bin/sdkmanager")"
 
     - name: Pin p4a to Python 3.11 (master now defaults to 3.14)
-      working-directory: android
       run: |
-        set -e
         echo "=== Patching p4a recipes to use Python 3.11.5 ==="
-        P4A_PKG=$(python -c "import pythonforandroid; print(pythonforandroid.__path__[0])" 2>&1)
-        echo "p4a package at: $P4A_PKG"
-        for recipe in hostpython3 python3; do
-          RECIPE="$P4A_PKG/recipes/$recipe/__init__.py"
-          echo "Checking $RECIPE ..."
-          if [ -f "$RECIPE" ]; then
-            BEFORE=$(grep 'version\s*=' "$RECIPE" | head -1 || true)
-            sed -i "s/version\s*=\s*'[^']*'/version = \"3.11.5\"/" "$RECIPE"
-            sed -i 's/version\s*=\s*"[^"]*"/version = "3.11.5"/' "$RECIPE"
-            AFTER=$(grep 'version\s*=' "$RECIPE" | head -1 || true)
-            echo "  $recipe: $BEFORE -> $AFTER"
-          else
-            echo "  $recipe: FILE NOT FOUND at $RECIPE"
-          fi
-        done
-        # Clean cached 3.14 artifacts
-        rm -rf .buildozer/android/platform/packages/Python-3.14* 2>/dev/null || true
-        rm -rf .buildozer/android/platform/build-*/build/other_builds/python3* 2>/dev/null || true
-        rm -rf .buildozer/android/platform/build-*/build/other_builds/hostpython3* 2>/dev/null || true
+        python3 << 'PYEOF'
+import pythonforandroid, os, re
+p = pythonforandroid.__path__[0]
+print(f"p4a at: {p}")
+for r in ("hostpython3", "python3"):
+    f = os.path.join(p, "recipes", r, "__init__.py")
+    if os.path.exists(f):
+        txt = open(f).read()
+        m = re.search(r'version\s*=\s*', txt)
+        if m:
+            new_txt = re.sub(r'version\s*=\s*[\x27\x22][^\x27\x22]*[\x27\x22]', 'version = "3.11.5"', txt)
+            open(f, "w").write(new_txt)
+            print(f"PATCHED {r}: {m.group(0)}... -> version = 3.11.5")
+        else:
+            print(f"WARNING: no version line found in {r}")
+    else:
+        print(f"WARNING: {r} recipe not found at {f}")
+PYEOF
         echo "=== Patching complete ==="
 
     - name: Build APK
