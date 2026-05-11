@@ -64,24 +64,18 @@ jobs:
         echo "SDK ready, sdkmanager: $(ls -la "$SDK_ROOT/tools/bin/sdkmanager")"
 
     - name: Pin p4a to Python 3.11 (master now defaults to 3.14)
-      working-directory: android
       run: |
-        P4A_DIR="../python-for-android-pinned"
+        P4A_DIR="$HOME/.buildozer/android/platform/python-for-android"
         rm -rf "$P4A_DIR"
-        # Clone develop branch which still uses Python 3.11
         git clone --depth=1 --branch develop https://github.com/kivy/python-for-android.git "$P4A_DIR"
-        # If develop also uses 3.14, revert hostpython3 recipe
-        HOSTPY="$P4A_DIR/pythonforandroid/recipes/hostpython3/__init__.py"
-        if grep -q "3.14" "$HOSTPY" 2>/dev/null; then
-          sed -i 's/version\s*=\s*"[^"]*"/version = "3.11.5"/' "$HOSTPY"
-          sed -i 's|v[0-9]\+\.[0-9]\+\.[0-9]\+\.tar\.gz|v3.11.5.tar.gz|' "$HOSTPY"
-        fi
-        PY3="$P4A_DIR/pythonforandroid/recipes/python3/__init__.py"
-        if [ -f "$PY3" ] && grep -q "3.14" "$PY3" 2>/dev/null; then
-          sed -i 's/version\s*=\s*"[^"]*"/version = "3.11.5"/' "$PY3"
-          sed -i 's|v[0-9]\+\.[0-9]\+\.[0-9]\+\.tar\.gz|v3.11.5.tar.gz|' "$PY3"
-        fi
-        echo "p4a Python version: $(grep 'version\s*=' "$HOSTPY" | head -1)"
+        # Patch all python recipes to use 3.11.5 instead of 3.14
+        for recipe in hostpython3 python3; do
+          RECIPE="$P4A_DIR/pythonforandroid/recipes/$recipe/__init__.py"
+          if [ -f "$RECIPE" ]; then
+            grep -q '3\.14' "$RECIPE" && sed -i 's|v3\.14\.[0-9]*\.tar\.gz|v3.11.5.tar.gz|g; s/version *= *"3\.14\.[0-9]*"/version = "3.11.5"/' "$RECIPE" || true
+          fi
+        done
+        echo "HOSTPY version: $(grep 'version\s*=' "$P4A_DIR/pythonforandroid/recipes/hostpython3/__init__.py" 2>/dev/null || echo 'not found')"
 
     - name: Build APK
       working-directory: android
