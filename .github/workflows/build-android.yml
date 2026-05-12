@@ -88,6 +88,9 @@ jobs:
           > "$P4A_DIR/pythonforandroid/recipes/python3/patches/disable_grp.patch"
         sed -i "/patches = \[/a \        'patches/disable_grp.patch'," "$P4A_DIR/pythonforandroid/recipes/python3/__init__.py"
         
+        echo "=== Patching p4a: skip pip upgrade (latest pip 26.1.1 has broken vendored resolvelib) ==="
+        sed -i "s|source venv/bin/activate && pip install -U pip|echo 'pip upgrade skipped'|" "$P4A_DIR/pythonforandroid/build.py"
+        
         echo "=== Patching numpy: missing #include <unordered_map> ==="
         printf '%s\n' \
           '--- a/numpy/_core/src/multiarray/unique.cpp' \
