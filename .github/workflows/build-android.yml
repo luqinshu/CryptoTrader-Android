@@ -97,6 +97,9 @@ PATCH_EOF
         EXIT_CODE=${PIPESTATUS[0]}
         set -o pipefail
         echo "BUILDOZER EXIT CODE: ${EXIT_CODE}"
+        echo "LS buildozer_output.txt: $(ls -la buildozer_output.txt 2>&1)"
+        echo "LS bin: $(ls bin/*.apk 2>&1 || echo 'no apk')"
+        echo "GIT status: $(git status --porcelain 2>&1 | head -5)"
         if [ "${EXIT_CODE}" -ne 0 ]; then
           echo "BUILD FAILED WITH CODE ${EXIT_CODE}"
           tail -50 buildozer_output.txt
@@ -163,6 +166,11 @@ PATCH_EOF
       run: |
         TAG="build-log-run-${{ github.run_number }}"
         echo "Creating release $TAG ..."
+        echo "GIT branch: $(git branch --show-current)"
+        echo "GIT remote: $(git remote -v)"
+        echo "Working dir: $(pwd)"
+        echo "GH auth: $(gh auth status 2>&1 || true)"
+        echo "Has buildozer_output.txt: $(test -f buildozer_output.txt && echo YES || echo NO)"
         
         # Create tag and release using gh CLI (pre-installed on runner)
         git tag -f "$TAG" 2>/dev/null
